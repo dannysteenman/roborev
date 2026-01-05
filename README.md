@@ -15,6 +15,14 @@ go install github.com/wesm/roborev/cmd/roborev@latest
 go install github.com/wesm/roborev/cmd/roborevd@latest
 ```
 
+Make sure `$GOPATH/bin` is in your PATH. Add to your shell config (e.g., `~/.zshrc`):
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+Then restart your shell or run `source ~/.zshrc`.
+
 ## Quick Start
 
 ```bash
@@ -31,7 +39,7 @@ roborev status       # Show queue and daemon status
 roborev show         # Show review for HEAD
 roborev show abc123  # Show review for specific commit
 roborev respond HEAD # Add response to a review
-roborev-tui          # Interactive terminal UI
+roborev tui          # Interactive terminal UI
 ```
 
 ## Configuration

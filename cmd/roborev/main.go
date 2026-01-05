@@ -43,6 +43,7 @@ func main() {
 	rootCmd.AddCommand(respondCmd())
 	rootCmd.AddCommand(installHookCmd())
 	rootCmd.AddCommand(daemonCmd())
+	rootCmd.AddCommand(tuiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

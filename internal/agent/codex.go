@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"strings"
 )
 
 // CodexAgent runs code reviews using the Codex CLI
@@ -26,16 +25,15 @@ func (a *CodexAgent) Name() string {
 }
 
 func (a *CodexAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string) (string, error) {
-	// Build the codex command with high reasoning effort
-	// The prompt is passed via stdin
+	// Use codex review subcommand for non-interactive review
 	args := []string{
-		"-c", "model_reasoning_effort=\"high\"",
-		"--quiet",
+		"review",
+		"--commit", commitSHA,
+		"-c", `model_reasoning_effort="high"`,
 	}
 
 	cmd := exec.CommandContext(ctx, a.Command, args...)
 	cmd.Dir = repoPath
-	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

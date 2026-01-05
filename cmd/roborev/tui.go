@@ -4,90 +4,88 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/spf13/cobra"
 	"github.com/user/roborev/internal/storage"
 )
 
+// TUI styles
 var (
-	serverAddr = "http://127.0.0.1:7373"
-)
-
-// Styles
-var (
-	titleStyle = lipgloss.NewStyle().
+	tuiTitleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("205")).
 			MarginBottom(1)
 
-	statusStyle = lipgloss.NewStyle().
+	tuiStatusStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
 
-	selectedStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("212"))
+	tuiSelectedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("212"))
 
-	queuedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))  // Yellow
-	runningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))   // Blue
-	doneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))   // Green
-	failedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))  // Red
+	tuiQueuedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // Yellow
+	tuiRunningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("33"))  // Blue
+	tuiDoneStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // Green
+	tuiFailedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // Red
 
-	helpStyle = lipgloss.NewStyle().
+	tuiHelpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			MarginTop(1)
 )
 
-type view int
+type tuiView int
 
 const (
-	viewQueue view = iota
-	viewReview
+	tuiViewQueue tuiView = iota
+	tuiViewReview
 )
 
-type model struct {
-	jobs         []storage.ReviewJob
-	status       storage.DaemonStatus
-	selectedIdx  int
-	currentView  view
+type tuiModel struct {
+	serverAddr    string
+	jobs          []storage.ReviewJob
+	status        storage.DaemonStatus
+	selectedIdx   int
+	currentView   tuiView
 	currentReview *storage.Review
-	reviewScroll int
-	width        int
-	height       int
-	err          error
+	reviewScroll  int
+	width         int
+	height        int
+	err           error
 }
 
-type tickMsg time.Time
-type jobsMsg []storage.ReviewJob
-type statusMsg storage.DaemonStatus
-type reviewMsg *storage.Review
-type errMsg error
+type tuiTickMsg time.Time
+type tuiJobsMsg []storage.ReviewJob
+type tuiStatusMsg storage.DaemonStatus
+type tuiReviewMsg *storage.Review
+type tuiErrMsg error
 
-func initialModel() model {
-	return model{
+func newTuiModel(serverAddr string) tuiModel {
+	return tuiModel{
+		serverAddr:  serverAddr,
 		jobs:        []storage.ReviewJob{},
-		currentView: viewQueue,
+		currentView: tuiViewQueue,
 	}
 }
 
-func (m model) Init() tea.Cmd {
-	return tea.Batch(tick(), fetchJobs(), fetchStatus())
+func (m tuiModel) Init() tea.Cmd {
+	return tea.Batch(m.tick(), m.fetchJobs(), m.fetchStatus())
 }
 
-func tick() tea.Cmd {
+func (m tuiModel) tick() tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
+		return tuiTickMsg(t)
 	})
 }
 
-func fetchJobs() tea.Cmd {
+func (m tuiModel) fetchJobs() tea.Cmd {
 	return func() tea.Msg {
-		resp, err := http.Get(serverAddr + "/api/jobs?limit=50")
+		resp, err := http.Get(m.serverAddr + "/api/jobs?limit=50")
 		if err != nil {
-			return errMsg(err)
+			return tuiErrMsg(err)
 		}
 		defer resp.Body.Close()
 
@@ -95,55 +93,55 @@ func fetchJobs() tea.Cmd {
 			Jobs []storage.ReviewJob `json:"jobs"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return errMsg(err)
+			return tuiErrMsg(err)
 		}
-		return jobsMsg(result.Jobs)
+		return tuiJobsMsg(result.Jobs)
 	}
 }
 
-func fetchStatus() tea.Cmd {
+func (m tuiModel) fetchStatus() tea.Cmd {
 	return func() tea.Msg {
-		resp, err := http.Get(serverAddr + "/api/status")
+		resp, err := http.Get(m.serverAddr + "/api/status")
 		if err != nil {
-			return errMsg(err)
+			return tuiErrMsg(err)
 		}
 		defer resp.Body.Close()
 
 		var status storage.DaemonStatus
 		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-			return errMsg(err)
+			return tuiErrMsg(err)
 		}
-		return statusMsg(status)
+		return tuiStatusMsg(status)
 	}
 }
 
-func fetchReview(sha string) tea.Cmd {
+func (m tuiModel) fetchReview(sha string) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := http.Get(serverAddr + "/api/review?sha=" + sha)
+		resp, err := http.Get(m.serverAddr + "/api/review?sha=" + sha)
 		if err != nil {
-			return errMsg(err)
+			return tuiErrMsg(err)
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusNotFound {
-			return errMsg(fmt.Errorf("no review found"))
+			return tuiErrMsg(fmt.Errorf("no review found"))
 		}
 
 		var review storage.Review
 		if err := json.NewDecoder(resp.Body).Decode(&review); err != nil {
-			return errMsg(err)
+			return tuiErrMsg(err)
 		}
-		return reviewMsg(&review)
+		return tuiReviewMsg(&review)
 	}
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			if m.currentView == viewReview {
-				m.currentView = viewQueue
+			if m.currentView == tuiViewReview {
+				m.currentView = tuiViewQueue
 				m.currentReview = nil
 				m.reviewScroll = 0
 				return m, nil
@@ -151,7 +149,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "up", "k":
-			if m.currentView == viewQueue {
+			if m.currentView == tuiViewQueue {
 				if m.selectedIdx > 0 {
 					m.selectedIdx--
 				}
@@ -162,7 +160,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
-			if m.currentView == viewQueue {
+			if m.currentView == tuiViewQueue {
 				if m.selectedIdx < len(m.jobs)-1 {
 					m.selectedIdx++
 				}
@@ -171,16 +169,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter":
-			if m.currentView == viewQueue && len(m.jobs) > 0 {
+			if m.currentView == tuiViewQueue && len(m.jobs) > 0 {
 				job := m.jobs[m.selectedIdx]
 				if job.Status == storage.JobStatusDone {
-					return m, fetchReview(job.CommitSHA)
+					return m, m.fetchReview(job.CommitSHA)
+				} else if job.Status == storage.JobStatusFailed {
+					// Show error inline for failed jobs
+					m.currentReview = &storage.Review{
+						Agent:  job.Agent,
+						Output: "Job failed:\n\n" + job.Error,
+						Job:    &job,
+					}
+					m.currentView = tuiViewReview
+					m.reviewScroll = 0
+					return m, nil
 				}
 			}
 
 		case "esc":
-			if m.currentView == viewReview {
-				m.currentView = viewQueue
+			if m.currentView == tuiViewReview {
+				m.currentView = tuiViewQueue
 				m.currentReview = nil
 				m.reviewScroll = 0
 			}
@@ -190,42 +198,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case tickMsg:
-		return m, tea.Batch(tick(), fetchJobs(), fetchStatus())
+	case tuiTickMsg:
+		return m, tea.Batch(m.tick(), m.fetchJobs(), m.fetchStatus())
 
-	case jobsMsg:
+	case tuiJobsMsg:
 		m.jobs = msg
 		if m.selectedIdx >= len(m.jobs) {
 			m.selectedIdx = max(0, len(m.jobs)-1)
 		}
 
-	case statusMsg:
+	case tuiStatusMsg:
 		m.status = storage.DaemonStatus(msg)
 
-	case reviewMsg:
+	case tuiReviewMsg:
 		m.currentReview = msg
-		m.currentView = viewReview
+		m.currentView = tuiViewReview
 		m.reviewScroll = 0
 
-	case errMsg:
+	case tuiErrMsg:
 		m.err = msg
 	}
 
 	return m, nil
 }
 
-func (m model) View() string {
-	if m.currentView == viewReview && m.currentReview != nil {
+func (m tuiModel) View() string {
+	if m.currentView == tuiViewReview && m.currentReview != nil {
 		return m.renderReviewView()
 	}
 	return m.renderQueueView()
 }
 
-func (m model) renderQueueView() string {
+func (m tuiModel) renderQueueView() string {
 	var b strings.Builder
 
 	// Title
-	b.WriteString(titleStyle.Render("RoboRev Queue"))
+	b.WriteString(tuiTitleStyle.Render("RoboRev Queue"))
 	b.WriteString("\n")
 
 	// Status line
@@ -233,7 +241,7 @@ func (m model) renderQueueView() string {
 		m.status.ActiveWorkers, m.status.MaxWorkers,
 		m.status.QueuedJobs, m.status.RunningJobs,
 		m.status.CompletedJobs, m.status.FailedJobs)
-	b.WriteString(statusStyle.Render(statusLine))
+	b.WriteString(tuiStatusStyle.Render(statusLine))
 	b.WriteString("\n\n")
 
 	if len(m.jobs) == 0 {
@@ -242,16 +250,16 @@ func (m model) renderQueueView() string {
 		// Header
 		header := fmt.Sprintf("%-4s %-7s %-15s %-12s %-8s %s",
 			"ID", "SHA", "Repo", "Agent", "Status", "Time")
-		b.WriteString(statusStyle.Render(header))
+		b.WriteString(tuiStatusStyle.Render(header))
 		b.WriteString("\n")
-		b.WriteString(strings.Repeat("─", min(m.width-2, 70)))
+		b.WriteString(strings.Repeat("-", min(m.width-2, 70)))
 		b.WriteString("\n")
 
 		// Jobs
 		for i, job := range m.jobs {
 			line := m.renderJobLine(job)
 			if i == m.selectedIdx {
-				line = selectedStyle.Render("▶ " + line)
+				line = tuiSelectedStyle.Render("> " + line)
 			} else {
 				line = "  " + line
 			}
@@ -261,12 +269,12 @@ func (m model) renderQueueView() string {
 	}
 
 	// Help
-	b.WriteString(helpStyle.Render("↑/↓: navigate | enter: view review | q: quit"))
+	b.WriteString(tuiHelpStyle.Render("up/down: navigate | enter: view review | q: quit"))
 
 	return b.String()
 }
 
-func (m model) renderJobLine(job storage.ReviewJob) string {
+func (m tuiModel) renderJobLine(job storage.ReviewJob) string {
 	sha := job.CommitSHA
 	if len(sha) > 7 {
 		sha = sha[:7]
@@ -295,13 +303,13 @@ func (m model) renderJobLine(job storage.ReviewJob) string {
 	var styledStatus string
 	switch job.Status {
 	case storage.JobStatusQueued:
-		styledStatus = queuedStyle.Render(status)
+		styledStatus = tuiQueuedStyle.Render(status)
 	case storage.JobStatusRunning:
-		styledStatus = runningStyle.Render(status)
+		styledStatus = tuiRunningStyle.Render(status)
 	case storage.JobStatusDone:
-		styledStatus = doneStyle.Render(status)
+		styledStatus = tuiDoneStyle.Render(status)
 	case storage.JobStatusFailed:
-		styledStatus = failedStyle.Render(status)
+		styledStatus = tuiFailedStyle.Render(status)
 	default:
 		styledStatus = status
 	}
@@ -310,7 +318,7 @@ func (m model) renderJobLine(job storage.ReviewJob) string {
 		job.ID, sha, repo, agent, styledStatus, elapsed)
 }
 
-func (m model) renderReviewView() string {
+func (m tuiModel) renderReviewView() string {
 	var b strings.Builder
 
 	review := m.currentReview
@@ -320,9 +328,9 @@ func (m model) renderReviewView() string {
 			sha = sha[:7]
 		}
 		title := fmt.Sprintf("Review: %s (%s)", sha, review.Agent)
-		b.WriteString(titleStyle.Render(title))
+		b.WriteString(tuiTitleStyle.Render(title))
 	} else {
-		b.WriteString(titleStyle.Render("Review"))
+		b.WriteString(tuiTitleStyle.Render("Review"))
 	}
 	b.WriteString("\n")
 
@@ -344,23 +352,26 @@ func (m model) renderReviewView() string {
 	// Scroll indicator
 	if len(lines) > visibleLines {
 		scrollInfo := fmt.Sprintf("[%d-%d of %d lines]", start+1, end, len(lines))
-		b.WriteString(statusStyle.Render(scrollInfo))
+		b.WriteString(tuiStatusStyle.Render(scrollInfo))
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpStyle.Render("↑/↓: scroll | esc/q: back"))
+	b.WriteString(tuiHelpStyle.Render("up/down: scroll | esc/q: back"))
 
 	return b.String()
 }
 
-func main() {
-	if len(os.Args) > 1 {
-		serverAddr = os.Args[1]
-	}
-
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+func tuiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tui",
+		Short: "Interactive terminal UI for monitoring reviews",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			addr := getDaemonAddr()
+			p := tea.NewProgram(newTuiModel(addr), tea.WithAltScreen())
+			if _, err := p.Run(); err != nil {
+				return fmt.Errorf("TUI error: %w", err)
+			}
+			return nil
+		},
 	}
 }
