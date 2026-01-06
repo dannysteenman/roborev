@@ -67,8 +67,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Get tag message
+        id: tag_message
+        run: |
+          # Get the tag message (our changelog), skipping the first line ("Release X.Y.Z")
+          TAG_MSG=$(git tag -l --format='%(contents:body)' ${GITHUB_REF#refs/tags/})
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAG_MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: artifacts/*.tar.gz
-          generate_release_notes: true
+          body: ${{ steps.tag_message.outputs.body }}

@@ -70,5 +70,6 @@ git push origin HEAD
 
 echo ""
 echo "Release $TAG created and pushed successfully!"
+echo "GitHub Actions will create the release with the changelog from the tag message."
 echo ""
 echo "GitHub release URL: https://github.com/wesm/roborev/releases/tag/$TAG"
