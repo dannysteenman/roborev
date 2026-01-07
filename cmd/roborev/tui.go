@@ -220,6 +220,51 @@ func (m tuiModel) addressReview(reviewID int64, addressed bool) tea.Cmd {
 	}
 }
 
+// addressReviewInBackground fetches the review ID and updates addressed status.
+// Used for optimistic updates from queue view - UI already updated, this syncs to server.
+func (m tuiModel) addressReviewInBackground(jobID int64, newState bool) tea.Cmd {
+	return func() tea.Msg {
+		// Fetch the review to get its ID
+		resp, err := m.client.Get(fmt.Sprintf("%s/api/review?job_id=%d", m.serverAddr, jobID))
+		if err != nil {
+			return tuiErrMsg(err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			return tuiErrMsg(fmt.Errorf("no review for this job"))
+		}
+		if resp.StatusCode != http.StatusOK {
+			return tuiErrMsg(fmt.Errorf("fetch review: %s", resp.Status))
+		}
+
+		var review storage.Review
+		if err := json.NewDecoder(resp.Body).Decode(&review); err != nil {
+			return tuiErrMsg(err)
+		}
+
+		// Now mark it
+		reqBody, err := json.Marshal(map[string]interface{}{
+			"review_id": review.ID,
+			"addressed": newState,
+		})
+		if err != nil {
+			return tuiErrMsg(err)
+		}
+		resp2, err := m.client.Post(m.serverAddr+"/api/review/address", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			return tuiErrMsg(err)
+		}
+		defer resp2.Body.Close()
+
+		if resp2.StatusCode != http.StatusOK {
+			return tuiErrMsg(fmt.Errorf("mark review: %s", resp2.Status))
+		}
+		// Success - UI already updated optimistically, nothing more to do
+		return nil
+	}
+}
+
 func (m tuiModel) toggleAddressedForJob(jobID int64, currentState *bool) tea.Cmd {
 	return func() tea.Msg {
 		// Fetch the review to get its ID
@@ -411,14 +456,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "a":
-			// Toggle addressed status
+			// Toggle addressed status (optimistic update - UI updates immediately)
 			if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.ID > 0 {
 				newState := !m.currentReview.Addressed
+				m.currentReview.Addressed = newState // Optimistic update
 				return m, m.addressReview(m.currentReview.ID, newState)
 			} else if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
-				job := m.jobs[m.selectedIdx]
+				job := &m.jobs[m.selectedIdx]
 				if job.Status == storage.JobStatusDone && job.Addressed != nil {
-					return m, m.toggleAddressedForJob(job.ID, job.Addressed)
+					newState := !*job.Addressed
+					*job.Addressed = newState // Optimistic update
+					return m, m.addressReviewInBackground(job.ID, newState)
 				}
 			}
 
