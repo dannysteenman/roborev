@@ -168,6 +168,17 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if branch is excluded from reviews
+	currentBranch := git.GetCurrentBranch(gitCwd)
+	if currentBranch != "" && config.IsBranchExcluded(repoRoot, currentBranch) {
+		// Silently skip excluded branches - return 200 OK with skipped flag
+		writeJSON(w, http.StatusOK, map[string]any{
+			"skipped": true,
+			"reason":  fmt.Sprintf("branch %q is excluded from reviews", currentBranch),
+		})
+		return
+	}
+
 	// Get or create repo (uses main repo root for identity)
 	repo, err := s.db.GetOrCreateRepo(repoRoot)
 	if err != nil {

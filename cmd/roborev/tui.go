@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"github.com/wesm/roborev/internal/config"
 	"github.com/wesm/roborev/internal/git"
 	"github.com/wesm/roborev/internal/storage"
 	"github.com/wesm/roborev/internal/update"
@@ -97,6 +98,9 @@ type tuiModel struct {
 	// Active filter (applied to queue view)
 	activeRepoFilter string // Empty = show all, otherwise repo root_path to filter by
 	hideAddressed    bool   // When true, hide jobs with addressed reviews
+
+	// Display name cache (keyed by repo path)
+	displayNames map[string]string
 }
 
 type tuiTickMsg time.Time
@@ -155,7 +159,8 @@ func newTuiModel(serverAddr string) tuiModel {
 		currentView:   tuiViewQueue,
 		width:         80, // sensible defaults until we get WindowSizeMsg
 		height:        24,
-		loadingJobs:   true, // Init() calls fetchJobs, so mark as loading
+		loadingJobs:   true,                    // Init() calls fetchJobs, so mark as loading
+		displayNames:  make(map[string]string), // Cache display names to avoid disk reads on render
 	}
 }
 
@@ -167,6 +172,34 @@ func (m tuiModel) Init() tea.Cmd {
 		m.fetchStatus(),
 		m.checkForUpdate(),
 	)
+}
+
+// getDisplayName returns the display name for a repo, using the cache.
+// Falls back to the provided default name if no display name is configured.
+func (m tuiModel) getDisplayName(repoPath, defaultName string) string {
+	if repoPath == "" {
+		return defaultName
+	}
+	if displayName, ok := m.displayNames[repoPath]; ok {
+		if displayName != "" {
+			return displayName
+		}
+	}
+	return defaultName
+}
+
+// updateDisplayNameCache updates the display name cache for the given repo paths.
+// This should be called when jobs are loaded to avoid disk reads during render.
+func (m *tuiModel) updateDisplayNameCache(jobs []storage.ReviewJob) {
+	for _, job := range jobs {
+		if job.RepoPath == "" {
+			continue
+		}
+		if _, ok := m.displayNames[job.RepoPath]; !ok {
+			// Load from config only once per repo path
+			m.displayNames[job.RepoPath] = config.GetDisplayName(job.RepoPath)
+		}
+	}
 }
 
 func (m tuiModel) tick() tea.Cmd {
@@ -1199,6 +1232,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.hasMore = msg.hasMore
 
+		// Update display name cache for new jobs
+		m.updateDisplayNameCache(msg.jobs)
+
 		if msg.append {
 			// Append mode: add new jobs to existing list
 			m.jobs = append(m.jobs, msg.jobs...)
@@ -1608,7 +1644,8 @@ func (m tuiModel) renderJobLine(job storage.ReviewJob, selected bool, idWidth in
 		ref = ref[:max(1, colWidths.ref-3)] + "..."
 	}
 
-	repo := job.RepoName
+	// Use cached display name, falling back to RepoName
+	repo := m.getDisplayName(job.RepoPath, job.RepoName)
 	if len(repo) > colWidths.repo {
 		repo = repo[:max(1, colWidths.repo-3)] + "..."
 	}
@@ -1746,9 +1783,14 @@ func (m tuiModel) renderReviewView() string {
 	if review.Job != nil {
 		ref := shortRef(review.Job.GitRef)
 		idStr := fmt.Sprintf("#%d ", review.Job.ID)
-		repoStr := ""
-		if review.Job.RepoName != "" {
-			repoStr = review.Job.RepoName + " "
+		// Use cached display name, falling back to RepoName, then basename of RepoPath
+		defaultName := review.Job.RepoName
+		if defaultName == "" && review.Job.RepoPath != "" {
+			defaultName = filepath.Base(review.Job.RepoPath)
+		}
+		repoStr := m.getDisplayName(review.Job.RepoPath, defaultName)
+		if repoStr != "" {
+			repoStr += " "
 		}
 
 		// Use cached branch name (computed when review was loaded)
@@ -1769,6 +1811,12 @@ func (m tuiModel) renderReviewView() string {
 		if review.Addressed {
 			b.WriteString(" ")
 			b.WriteString(tuiAddressedStyle.Render("[ADDRESSED]"))
+		}
+
+		// Show full repo path on next line
+		if review.Job.RepoPath != "" {
+			b.WriteString("\n")
+			b.WriteString(tuiStatusStyle.Render(review.Job.RepoPath))
 		}
 
 		// Show verdict on line 2 (only if present)
@@ -1807,8 +1855,11 @@ func (m tuiModel) renderReviewView() string {
 		helpLines = (len(helpText) + m.width - 1) / m.width
 	}
 
-	// headerHeight = title + scroll indicator (1) + help + verdict (0|1)
+	// headerHeight = title + repo path (0|1) + scroll indicator (1) + help + verdict (0|1)
 	headerHeight := titleLines + 1 + helpLines
+	if review.Job != nil && review.Job.RepoPath != "" {
+		headerHeight++ // Add 1 for repo path line
+	}
 	if review.Job != nil && review.Job.Verdict != nil && *review.Job.Verdict != "" {
 		headerHeight++ // Add 1 for verdict line
 	}
