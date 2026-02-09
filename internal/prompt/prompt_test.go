@@ -565,3 +565,70 @@ func TestBuildPromptWithGeminiAgent(t *testing.T) {
 		t.Error("Prompt should not contain default system prompt text")
 	}
 }
+
+func TestBuildPromptDesignReviewType(t *testing.T) {
+	repoPath, commits := setupTestRepo(t)
+	targetSHA := commits[len(commits)-1]
+
+	// Single commit with reviewType="design" should use design-review prompt
+	b := NewBuilder(nil)
+	prompt, err := b.Build(repoPath, targetSHA, 0, 0, "test", "design")
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(prompt, "design reviewer") {
+		t.Error("Expected design-review system prompt for reviewType=design")
+	}
+	if strings.Contains(prompt, "code reviewer") {
+		t.Error("Should not contain standard code review prompt")
+	}
+}
+
+func TestBuildDirtyDesignReviewType(t *testing.T) {
+	diff := "diff --git a/design.md b/design.md\n+# Design\n"
+	b := NewBuilder(nil)
+
+	// Use a temp dir as repo path (no .roborev.toml needed)
+	repoPath := t.TempDir()
+	prompt, err := b.BuildDirty(repoPath, diff, 0, 0, "test", "design")
+	if err != nil {
+		t.Fatalf("BuildDirty failed: %v", err)
+	}
+	if !strings.Contains(prompt, "design reviewer") {
+		t.Error("Expected design-review system prompt for dirty reviewType=design")
+	}
+	if strings.Contains(prompt, "code reviewer") {
+		t.Error("Should not contain standard dirty review prompt")
+	}
+}
+
+func TestBuildDirtyWithReviewAlias(t *testing.T) {
+	diff := "diff --git a/foo.go b/foo.go\n+func foo() {}\n"
+	b := NewBuilder(nil)
+	repoPath := t.TempDir()
+
+	// "review" alias should produce the dirty prompt, NOT the single-commit prompt
+	prompt, err := b.BuildDirty(repoPath, diff, 0, 0, "test", "review")
+	if err != nil {
+		t.Fatalf("BuildDirty failed: %v", err)
+	}
+	if !strings.Contains(prompt, "uncommitted changes") {
+		t.Error("Expected dirty system prompt for reviewType=review alias, got wrong prompt type")
+	}
+}
+
+func TestBuildRangeWithReviewAlias(t *testing.T) {
+	repoPath, commits := setupTestRepo(t)
+	// Use a two-commit range
+	rangeRef := commits[3] + ".." + commits[5]
+
+	b := NewBuilder(nil)
+	prompt, err := b.Build(repoPath, rangeRef, 0, 0, "test", "review")
+	if err != nil {
+		t.Fatalf("Build (range) failed: %v", err)
+	}
+	// Should use the range system prompt, not single-commit
+	if !strings.Contains(prompt, "commit range") {
+		t.Error("Expected range system prompt for reviewType=review alias, got wrong prompt type")
+	}
+}

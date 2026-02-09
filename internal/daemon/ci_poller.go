@@ -284,11 +284,15 @@ func (p *CIPoller) processPR(ctx context.Context, ghRepo string, pr ghPR, cfg *c
 		}
 	}
 
-	// Validate review types to catch typos early
-	validTypes := map[string]bool{"security": true, "review": true, "general": true}
+	// Validate review types to catch typos early.
+	// Empty string is rejected here (likely a config typo); use "default" explicitly.
+	validSpecialTypes := map[string]bool{"security": true, "design": true}
 	for _, rt := range reviewTypes {
-		if !validTypes[rt] {
-			return fmt.Errorf("invalid review_type %q (valid: security, review, general)", rt)
+		if rt == "" {
+			return fmt.Errorf("invalid review_type %q (valid: default, security, design)", rt)
+		}
+		if !config.IsDefaultReviewType(rt) && !validSpecialTypes[rt] {
+			return fmt.Errorf("invalid review_type %q (valid: default, security, design)", rt)
 		}
 	}
 
@@ -387,9 +391,9 @@ func (p *CIPoller) processPR(ctx context.Context, ghRepo string, pr ghPR, cfg *c
 	}
 
 	for _, rt := range reviewTypes {
-		// Map review_type to workflow name (same as handleEnqueue)
+		// Map review_type to workflow name (same as handleEnqueue).
 		workflow := "review"
-		if rt != "" && rt != "general" {
+		if !config.IsDefaultReviewType(rt) {
 			workflow = rt
 		}
 

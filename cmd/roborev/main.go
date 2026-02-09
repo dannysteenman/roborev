@@ -717,6 +717,7 @@ Examples:
   roborev review abc123 def456  # Review range from abc123 to def456 (inclusive)
   roborev review --dirty      # Review uncommitted changes
   roborev review --dirty --wait  # Review uncommitted changes and wait for result
+  roborev review --type design   # Design-focused review of HEAD
   roborev review --branch     # Review all commits on current branch since main
   roborev review --branch --base develop  # Review branch against develop
   roborev review --since HEAD~5  # Review last 5 commits
@@ -781,8 +782,8 @@ Examples:
 			}
 
 			// Validate --type flag
-			if reviewType != "" && reviewType != "security" {
-				return fmt.Errorf("invalid --type %q (valid: security)", reviewType)
+			if reviewType != "" && reviewType != "security" && reviewType != "design" {
+				return fmt.Errorf("invalid --type %q (valid: security, design)", reviewType)
 			}
 
 			var gitRef string
@@ -893,8 +894,8 @@ Examples:
 				return runLocalReview(cmd, root, gitRef, diffContent, agent, model, reasoning, reviewType, quiet)
 			}
 
-			// Make request - server will validate and resolve refs
-			reqBody, _ := json.Marshal(map[string]interface{}{
+			// Build request body
+			reqFields := map[string]interface{}{
 				"repo_path":    root,
 				"git_ref":      gitRef,
 				"branch":       branchName,
@@ -903,7 +904,9 @@ Examples:
 				"reasoning":    reasoning,
 				"review_type":  reviewType,
 				"diff_content": diffContent,
-			})
+			}
+
+			reqBody, _ := json.Marshal(reqFields)
 
 			resp, err := http.Post(serverAddr+"/api/enqueue", "application/json", bytes.NewReader(reqBody))
 			if err != nil {
@@ -971,7 +974,7 @@ Examples:
 	cmd.Flags().StringVar(&baseBranch, "base", "", "base branch for --branch comparison (default: auto-detect)")
 	cmd.Flags().StringVar(&since, "since", "", "review commits since this commit (exclusive, like git's .. range)")
 	cmd.Flags().BoolVar(&local, "local", false, "run review locally without daemon (streams output to console)")
-	cmd.Flags().StringVar(&reviewType, "type", "", "review type (e.g., security) — changes system prompt")
+	cmd.Flags().StringVar(&reviewType, "type", "", "review type (security, design) — changes system prompt")
 
 	return cmd
 }
@@ -992,7 +995,7 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 
 	// Map review_type to config workflow (matches daemon behavior)
 	workflow := "review"
-	if reviewType != "" && reviewType != "general" {
+	if !config.IsDefaultReviewType(reviewType) {
 		workflow = reviewType
 	}
 
@@ -2322,9 +2325,9 @@ This command is idempotent - running it multiple times is safe.`,
 				fmt.Println("\nSkills installed! Try:")
 				for _, agent := range installedAgents {
 					if agent == skills.AgentClaude {
-						fmt.Println("  Claude Code: /roborev:address, /roborev:respond, /roborev:fix")
+						fmt.Println("  Claude Code: /roborev:address, /roborev:design-review, /roborev:respond, /roborev:fix")
 					} else if agent == skills.AgentCodex {
-						fmt.Println("  Codex: $roborev:address, $roborev:respond, $roborev:fix")
+						fmt.Println("  Codex: $roborev:address, $roborev:design-review, $roborev:respond, $roborev:fix")
 					}
 				}
 			}

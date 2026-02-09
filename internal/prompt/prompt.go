@@ -123,7 +123,7 @@ func NewBuilder(db *storage.DB) *Builder {
 }
 
 // Build constructs a review prompt for a commit or range with context from previous reviews.
-// reviewType selects the system prompt variant (e.g., "security"); empty or "general" uses the default.
+// reviewType selects the system prompt variant (e.g., "security"); any default alias (see config.IsDefaultReviewType) uses the standard prompt.
 func (b *Builder) Build(repoPath, gitRef string, repoID int64, contextCount int, agentName, reviewType string) (string, error) {
 	if git.IsRange(gitRef) {
 		return b.buildRangePrompt(repoPath, gitRef, repoID, contextCount, agentName, reviewType)
@@ -133,14 +133,17 @@ func (b *Builder) Build(repoPath, gitRef string, repoID int64, contextCount int,
 
 // BuildDirty constructs a review prompt for uncommitted (dirty) changes.
 // The diff is provided directly since it was captured at enqueue time.
-// reviewType selects the system prompt variant (e.g., "security"); empty or "general" uses the default.
+// reviewType selects the system prompt variant (e.g., "security"); any default alias (see config.IsDefaultReviewType) uses the standard prompt.
 func (b *Builder) BuildDirty(repoPath, diff string, repoID int64, contextCount int, agentName, reviewType string) (string, error) {
 	var sb strings.Builder
 
 	// Start with system prompt for dirty changes
 	promptType := "dirty"
-	if reviewType != "" && reviewType != "general" {
+	if !config.IsDefaultReviewType(reviewType) {
 		promptType = reviewType
+	}
+	if promptType == "design" {
+		promptType = "design-review"
 	}
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
@@ -202,8 +205,11 @@ func (b *Builder) buildSinglePrompt(repoPath, sha string, repoID int64, contextC
 
 	// Start with system prompt
 	promptType := "review"
-	if reviewType != "" && reviewType != "general" {
+	if !config.IsDefaultReviewType(reviewType) {
 		promptType = reviewType
+	}
+	if promptType == "design" {
+		promptType = "design-review"
 	}
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
@@ -283,8 +289,11 @@ func (b *Builder) buildRangePrompt(repoPath, rangeRef string, repoID int64, cont
 
 	// Start with system prompt for ranges
 	promptType := "range"
-	if reviewType != "" && reviewType != "general" {
+	if !config.IsDefaultReviewType(reviewType) {
 		promptType = reviewType
+	}
+	if promptType == "design" {
+		promptType = "design-review"
 	}
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
@@ -471,6 +480,29 @@ func (b *Builder) getPreviousReviewContexts(repoPath, sha string, count int) ([]
 
 	return contexts, nil
 }
+
+// SystemPromptDesignReview is the base instruction for reviewing design documents
+const SystemPromptDesignReview = `You are a design reviewer. Review the design proposal shown below for:
+
+1. **Completeness**: Are goals, non-goals, success criteria, and edge cases defined?
+2. **Feasibility**: Are technical decisions grounded in the actual codebase?
+3. **Task scoping**: Are implementation stages small enough to review incrementally? Are dependencies ordered correctly?
+4. **Missing considerations**: Security, performance, backwards compatibility, error handling
+5. **Clarity**: Are decisions justified and understandable?
+
+After reviewing, provide:
+
+1. A brief summary of what the design proposes
+2. PRD findings, listed with:
+   - Severity (high/medium/low)
+   - A brief explanation of the issue and suggested improvement
+3. Task list findings, listed with:
+   - Severity (high/medium/low)
+   - A brief explanation of the issue and suggested improvement
+4. Any missing considerations not covered by the design
+5. A verdict: Pass or Fail with brief justification
+
+If you find no issues, state "No issues found." after the summary.`
 
 // BuildSimple constructs a simpler prompt without database context
 func BuildSimple(repoPath, sha, agentName string) (string, error) {
