@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS review_jobs (
   prompt TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0,
   diff_content TEXT,
-  output_prefix TEXT
+  output_prefix TEXT,
+  job_type TEXT NOT NULL DEFAULT 'review',
+  review_type TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -70,10 +72,44 @@ CREATE TABLE IF NOT EXISTS responses (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS ci_pr_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  github_repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  head_sha TEXT NOT NULL,
+  job_id INTEGER NOT NULL REFERENCES review_jobs(id),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(github_repo, pr_number, head_sha)
+);
+
+CREATE TABLE IF NOT EXISTS ci_pr_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  github_repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  head_sha TEXT NOT NULL,
+  total_jobs INTEGER NOT NULL,
+  completed_jobs INTEGER NOT NULL DEFAULT 0,
+  failed_jobs INTEGER NOT NULL DEFAULT 0,
+  synthesized INTEGER NOT NULL DEFAULT 0,
+  claimed_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(github_repo, pr_number, head_sha)
+);
+
+CREATE TABLE IF NOT EXISTS ci_pr_batch_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL REFERENCES ci_pr_batches(id),
+  job_id INTEGER NOT NULL REFERENCES review_jobs(id),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_review_jobs_status ON review_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_review_jobs_repo ON review_jobs(repo_id);
 CREATE INDEX IF NOT EXISTS idx_review_jobs_git_ref ON review_jobs(git_ref);
 CREATE INDEX IF NOT EXISTS idx_commits_sha ON commits(sha);
+CREATE INDEX IF NOT EXISTS idx_ci_pr_batch_jobs_batch ON ci_pr_batch_jobs(batch_id);
+CREATE INDEX IF NOT EXISTS idx_ci_pr_batch_jobs_job ON ci_pr_batch_jobs(job_id);
 `
 
 type DB struct {
@@ -496,6 +532,43 @@ func (db *DB) migrate() error {
 			if err != nil {
 				return fmt.Errorf("create idx_responses_job_id: %w", err)
 			}
+		}
+	}
+
+	// Migration: add job_type column to review_jobs if missing
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('review_jobs') WHERE name = 'job_type'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check job_type column: %w", err)
+	}
+	if count == 0 {
+		_, err = db.Exec(`ALTER TABLE review_jobs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'review'`)
+		if err != nil {
+			return fmt.Errorf("add job_type column: %w", err)
+		}
+		// Backfill job_type for existing rows
+		_, err = db.Exec(`UPDATE review_jobs SET job_type = 'dirty' WHERE (git_ref = 'dirty' OR diff_content IS NOT NULL) AND job_type = 'review'`)
+		if err != nil {
+			return fmt.Errorf("backfill job_type dirty: %w", err)
+		}
+		_, err = db.Exec(`UPDATE review_jobs SET job_type = 'range' WHERE git_ref LIKE '%..%' AND commit_id IS NULL AND job_type = 'review'`)
+		if err != nil {
+			return fmt.Errorf("backfill job_type range: %w", err)
+		}
+		_, err = db.Exec(`UPDATE review_jobs SET job_type = 'task' WHERE commit_id IS NULL AND diff_content IS NULL AND git_ref != 'dirty' AND git_ref NOT LIKE '%..%' AND git_ref != '' AND job_type = 'review'`)
+		if err != nil {
+			return fmt.Errorf("backfill job_type task: %w", err)
+		}
+	}
+
+	// Migration: add review_type column to review_jobs if missing
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('review_jobs') WHERE name = 'review_type'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check review_type column: %w", err)
+	}
+	if count == 0 {
+		_, err = db.Exec(`ALTER TABLE review_jobs ADD COLUMN review_type TEXT NOT NULL DEFAULT ''`)
+		if err != nil {
+			return fmt.Errorf("add review_type column: %w", err)
 		}
 	}
 

@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -93,6 +95,57 @@ func getDaemonAddr() string {
 		return fmt.Sprintf("http://%s", info.Addr)
 	}
 	return serverAddr
+}
+
+// registerRepoError is a server-side error from the register endpoint
+// (daemon reachable but returned non-200). Distinguished from connection
+// errors so callers can report appropriately.
+type registerRepoError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *registerRepoError) Error() string {
+	return fmt.Sprintf("server returned %d: %s", e.StatusCode, e.Body)
+}
+
+// isTransportError returns true if err indicates a transport-level failure
+// (connection refused, timeout, DNS resolution, etc.) where the daemon is
+// likely not reachable. Returns false for malformed URLs, TLS config errors,
+// and other non-transport url.Error cases that deserve explicit reporting.
+func isTransportError(err error) bool {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return false
+	}
+	// Check if the underlying error is a net-level transport failure
+	var opErr *net.OpError
+	if errors.As(urlErr.Err, &opErr) {
+		return true
+	}
+	// Also catch net.Error (timeout interface) that isn't wrapped in OpError
+	var netErr net.Error
+	return errors.As(urlErr.Err, &netErr)
+}
+
+// registerRepo tells the daemon to persist a repo to the DB so that the
+// CI poller (and other components) can find it after a daemon restart.
+func registerRepo(repoPath string) error {
+	body, err := json.Marshal(map[string]string{"repo_path": repoPath})
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(getDaemonAddr()+"/api/repos/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err // connection error (*url.Error wrapping net.Error)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return &registerRepoError{StatusCode: resp.StatusCode, Body: string(msg)}
+	}
+	return nil
 }
 
 // ensureDaemon checks if daemon is running, starts it if not
@@ -273,6 +326,7 @@ func restartDaemon() error {
 
 func initCmd() *cobra.Command {
 	var agent string
+	var noDaemon bool
 
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -281,7 +335,7 @@ func initCmd() *cobra.Command {
   - Creates ~/.roborev/ global config directory
   - Creates .roborev.toml in repo (if --agent specified)
   - Installs post-commit hook
-  - Starts the daemon`,
+  - Starts the daemon (unless --no-daemon)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Println("Initializing roborev...")
 
@@ -372,17 +426,42 @@ func initCmd() *cobra.Command {
 			fmt.Printf("  Installed post-commit hook\n")
 
 		startDaemon:
-			// 5. Start daemon
-			if err := ensureDaemon(); err != nil {
+			// 5. Start daemon (or just register if --no-daemon)
+			var initIncomplete bool
+			if noDaemon {
+				// Try to register with an already-running daemon, but don't start one
+				if err := registerRepo(root); err != nil {
+					initIncomplete = true
+					if isTransportError(err) {
+						fmt.Println("  Daemon not running (use 'roborev daemon start' or systemctl)")
+					} else {
+						fmt.Printf("  Warning: failed to register repo: %v\n", err)
+					}
+				} else {
+					fmt.Println("  Repo registered with running daemon")
+				}
+			} else if err := ensureDaemon(); err != nil {
+				initIncomplete = true
 				fmt.Printf("  Warning: %v\n", err)
 				fmt.Println("  Run 'roborev daemon start' to start manually")
 			} else {
 				fmt.Println("  Daemon is running")
+				if err := registerRepo(root); err != nil {
+					initIncomplete = true
+					fmt.Printf("  Warning: failed to register repo: %v\n", err)
+				} else {
+					fmt.Println("  Repo registered")
+				}
 			}
 
 			// 5. Success message
 			fmt.Println()
-			fmt.Println("Ready! Every commit will now be automatically reviewed.")
+			if initIncomplete {
+				fmt.Println("Setup incomplete: repo was not registered with the daemon.")
+				fmt.Println("Start the daemon and run 'roborev init' again, or register manually.")
+			} else {
+				fmt.Println("Ready! Every commit will now be automatically reviewed.")
+			}
 			fmt.Println()
 			fmt.Println("Commands:")
 			fmt.Println("  roborev status      - view queue and daemon status")
@@ -394,6 +473,7 @@ func initCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&agent, "agent", "", "default agent (codex, claude-code, gemini, copilot, opencode, cursor)")
+	cmd.Flags().BoolVar(&noDaemon, "no-daemon", false, "skip auto-starting daemon (useful with systemd/launchd)")
 
 	return cmd
 }
@@ -546,6 +626,22 @@ func daemonRunCmd() *cobra.Command {
 				server.SetSyncWorker(syncWorker)
 			}
 
+			// Start CI poller if enabled
+			var ciPoller *daemon.CIPoller
+			if cfg.CI.Enabled {
+				ciPoller = daemon.NewCIPoller(db, server.ConfigWatcher(), server.Broadcaster())
+				server.SetCIPoller(ciPoller) // wire callbacks before Start to avoid race
+				if err := ciPoller.Start(); err != nil {
+					log.Printf("Warning: failed to start CI poller: %v", err)
+				} else {
+					interval := cfg.CI.PollInterval
+					if interval == "" {
+						interval = "5m"
+					}
+					log.Printf("CI poller started (interval: %s, repos: %v)", interval, cfg.CI.Repos)
+				}
+			}
+
 			// Handle shutdown signals
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, os.Interrupt)
@@ -558,6 +654,9 @@ func daemonRunCmd() *cobra.Command {
 				sig := <-sigCh
 				log.Printf("Received signal %v, shutting down...", sig)
 				cancel() // Cancel context to stop config watcher
+				if ciPoller != nil {
+					ciPoller.Stop()
+				}
 				if syncWorker != nil {
 					// Final push before shutdown to ensure local changes are synced
 					if err := syncWorker.FinalPush(); err != nil {
@@ -595,6 +694,7 @@ func reviewCmd() *cobra.Command {
 		agent      string
 		model      string
 		reasoning  string
+		reviewType string
 		fast       bool
 		quiet      bool
 		dirty      bool
@@ -621,6 +721,8 @@ Examples:
   roborev review --branch --base develop  # Review branch against develop
   roborev review --since HEAD~5  # Review last 5 commits
   roborev review --since abc123  # Review commits since abc123 (exclusive)
+  roborev review --type security   # Security-focused review of HEAD
+  roborev review --branch --type security  # Security review of branch
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// In quiet mode, suppress cobra's error output (hook uses &, so exit code doesn't matter)
@@ -676,6 +778,11 @@ Examples:
 			}
 			if since != "" && len(args) > 0 {
 				return fmt.Errorf("cannot specify commits with --since")
+			}
+
+			// Validate --type flag
+			if reviewType != "" && reviewType != "security" {
+				return fmt.Errorf("invalid --type %q (valid: security)", reviewType)
 			}
 
 			var gitRef string
@@ -783,7 +890,7 @@ Examples:
 
 			// Handle --local mode: run agent directly without daemon
 			if local {
-				return runLocalReview(cmd, root, gitRef, diffContent, agent, model, reasoning, quiet)
+				return runLocalReview(cmd, root, gitRef, diffContent, agent, model, reasoning, reviewType, quiet)
 			}
 
 			// Make request - server will validate and resolve refs
@@ -794,6 +901,7 @@ Examples:
 				"agent":        agent,
 				"model":        model,
 				"reasoning":    reasoning,
+				"review_type":  reviewType,
 				"diff_content": diffContent,
 			})
 
@@ -863,12 +971,13 @@ Examples:
 	cmd.Flags().StringVar(&baseBranch, "base", "", "base branch for --branch comparison (default: auto-detect)")
 	cmd.Flags().StringVar(&since, "since", "", "review commits since this commit (exclusive, like git's .. range)")
 	cmd.Flags().BoolVar(&local, "local", false, "run review locally without daemon (streams output to console)")
+	cmd.Flags().StringVar(&reviewType, "type", "", "review type (e.g., security) — changes system prompt")
 
 	return cmd
 }
 
 // runLocalReview runs a review directly without the daemon
-func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName, model, reasoning string, quiet bool) error {
+func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName, model, reasoning, reviewType string, quiet bool) error {
 	// Load config
 	cfg, err := config.LoadGlobal()
 	if err != nil {
@@ -881,8 +990,14 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 		return fmt.Errorf("invalid reasoning: %w", err)
 	}
 
+	// Map review_type to config workflow (matches daemon behavior)
+	workflow := "review"
+	if reviewType != "" && reviewType != "general" {
+		workflow = reviewType
+	}
+
 	// Resolve agent using workflow-specific resolution (matches daemon behavior)
-	agentName = config.ResolveAgentForWorkflow(agentName, repoPath, cfg, "review", reasoning)
+	agentName = config.ResolveAgentForWorkflow(agentName, repoPath, cfg, workflow, reasoning)
 
 	// Get the agent
 	a, err := agent.GetAvailable(agentName)
@@ -891,7 +1006,7 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 	}
 
 	// Resolve model using workflow-specific resolution (matches daemon behavior)
-	model = config.ResolveModelForWorkflow(model, repoPath, cfg, "review", reasoning)
+	model = config.ResolveModelForWorkflow(model, repoPath, cfg, workflow, reasoning)
 
 	// Configure agent with model and reasoning
 	reasoningLevel := agent.ParseReasoningLevel(reasoning)
@@ -911,9 +1026,9 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 	var reviewPrompt string
 	if diffContent != "" {
 		// Dirty review
-		reviewPrompt, err = prompt.NewBuilder(nil).BuildDirty(repoPath, diffContent, 0, cfg.ReviewContextCount, a.Name())
+		reviewPrompt, err = prompt.NewBuilder(nil).BuildDirty(repoPath, diffContent, 0, cfg.ReviewContextCount, a.Name(), reviewType)
 	} else {
-		reviewPrompt, err = prompt.NewBuilder(nil).Build(repoPath, gitRef, 0, cfg.ReviewContextCount, a.Name())
+		reviewPrompt, err = prompt.NewBuilder(nil).Build(repoPath, gitRef, 0, cfg.ReviewContextCount, a.Name(), reviewType)
 	}
 	if err != nil {
 		return fmt.Errorf("build prompt: %w", err)

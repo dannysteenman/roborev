@@ -29,6 +29,7 @@ type Server struct {
 	workerPool    *WorkerPool
 	httpServer    *http.Server
 	syncWorker    *storage.SyncWorker
+	ciPoller      *CIPoller
 	hookRunner    *HookRunner
 	errorLog      *ErrorLog
 	startTime     time.Time
@@ -76,6 +77,7 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	mux.HandleFunc("/api/job/rerun", s.handleRerunJob)
 	mux.HandleFunc("/api/job/update-branch", s.handleUpdateJobBranch)
 	mux.HandleFunc("/api/repos", s.handleListRepos)
+	mux.HandleFunc("/api/repos/register", s.handleRegisterRepo)
 	mux.HandleFunc("/api/branches", s.handleListBranches)
 	mux.HandleFunc("/api/review", s.handleGetReview)
 	mux.HandleFunc("/api/review/address", s.handleAddressReview)
@@ -186,6 +188,11 @@ func (s *Server) Stop() error {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
 
+	// Stop CI poller
+	if s.ciPoller != nil {
+		s.ciPoller.Stop()
+	}
+
 	// Stop worker pool
 	s.workerPool.Stop()
 
@@ -202,9 +209,29 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// ConfigWatcher returns the server's config watcher (for use by external components)
+func (s *Server) ConfigWatcher() *ConfigWatcher {
+	return s.configWatcher
+}
+
+// Broadcaster returns the server's event broadcaster (for use by external components)
+func (s *Server) Broadcaster() Broadcaster {
+	return s.broadcaster
+}
+
 // SetSyncWorker sets the sync worker for triggering manual syncs
 func (s *Server) SetSyncWorker(sw *storage.SyncWorker) {
 	s.syncWorker = sw
+}
+
+// SetCIPoller sets the CI poller for status reporting and wires up
+// the worker pool cancellation callback so the poller can kill running
+// processes when superseding stale batches.
+func (s *Server) SetCIPoller(cp *CIPoller) {
+	s.ciPoller = cp
+	cp.jobCancelFn = func(jobID int64) {
+		s.workerPool.CancelJob(jobID)
+	}
 }
 
 // handleSyncNow triggers an immediate sync cycle
@@ -339,6 +366,7 @@ type EnqueueRequest struct {
 	Model        string `json:"model,omitempty"`         // Model to use (for opencode: provider/model format)
 	DiffContent  string `json:"diff_content,omitempty"`  // Pre-captured diff for dirty reviews
 	Reasoning    string `json:"reasoning,omitempty"`     // Reasoning level: thorough, standard, fast
+	ReviewType   string `json:"review_type,omitempty"`   // Review type (e.g., "security") — changes system prompt
 	CustomPrompt string `json:"custom_prompt,omitempty"` // Custom prompt for ad-hoc agent work
 	Agentic      bool   `json:"agentic,omitempty"`       // Enable agentic mode (allow file edits)
 	OutputPrefix string `json:"output_prefix,omitempty"` // Prefix to prepend to review output
@@ -404,6 +432,15 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate and default review_type
+	if req.ReviewType == "" {
+		req.ReviewType = "general"
+	}
+	if req.ReviewType != "general" && req.ReviewType != "security" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid review_type %q (valid: general, security)", req.ReviewType))
+		return
+	}
+
 	// Get the working directory root for git commands (may be a worktree)
 	// This is needed to resolve refs like HEAD correctly in the worktree context
 	gitCwd, err := git.GetRepoRoot(req.RepoPath)
@@ -448,8 +485,15 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve agent for review workflow at this reasoning level
-	agentName := config.ResolveAgentForWorkflow(req.Agent, repoRoot, s.configWatcher.Config(), "review", reasoning)
+	// Map review_type to config workflow for agent/model resolution.
+	// "general" uses the standard "review" workflow; "security" uses "security" workflow.
+	workflow := "review"
+	if req.ReviewType != "" && req.ReviewType != "general" {
+		workflow = req.ReviewType
+	}
+
+	// Resolve agent for workflow at this reasoning level
+	agentName := config.ResolveAgentForWorkflow(req.Agent, repoRoot, s.configWatcher.Config(), workflow, reasoning)
 
 	// Resolve to an installed agent: if the configured agent isn't available,
 	// fall back through the chain (codex -> claude-code -> gemini -> ...).
@@ -461,8 +505,8 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		agentName = resolved.Name()
 	}
 
-	// Resolve model for review workflow at this reasoning level
-	model := config.ResolveModelForWorkflow(req.Model, repoRoot, s.configWatcher.Config(), "review", reasoning)
+	// Resolve model for workflow at this reasoning level
+	model := config.ResolveModelForWorkflow(req.Model, repoRoot, s.configWatcher.Config(), workflow, reasoning)
 
 	// Check if this is a custom prompt, dirty review, range, or single commit
 	// Note: isPrompt is determined by whether custom_prompt is provided, not git_ref value
@@ -487,12 +531,13 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	var job *storage.ReviewJob
 	if isPrompt {
 		// Custom prompt job - use provided prompt directly
-		job, err = s.db.EnqueuePromptJob(storage.PromptJobOptions{
+		job, err = s.db.EnqueueJob(storage.EnqueueOpts{
 			RepoID:       repo.ID,
 			Branch:       req.Branch,
 			Agent:        agentName,
 			Model:        model,
 			Reasoning:    reasoning,
+			ReviewType:   req.ReviewType,
 			Prompt:       req.CustomPrompt,
 			OutputPrefix: req.OutputPrefix,
 			Agentic:      req.Agentic,
@@ -504,7 +549,16 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if isDirty {
 		// Dirty review - use pre-captured diff
-		job, err = s.db.EnqueueDirtyJob(repo.ID, gitRef, req.Branch, agentName, model, reasoning, req.DiffContent)
+		job, err = s.db.EnqueueJob(storage.EnqueueOpts{
+			RepoID:      repo.ID,
+			GitRef:      gitRef,
+			Branch:      req.Branch,
+			Agent:       agentName,
+			Model:       model,
+			Reasoning:   reasoning,
+			ReviewType:  req.ReviewType,
+			DiffContent: req.DiffContent,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue dirty job: %v", err))
 			return
@@ -526,7 +580,15 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 
 		// Store as full SHA range
 		fullRef := startSHA + ".." + endSHA
-		job, err = s.db.EnqueueRangeJob(repo.ID, fullRef, req.Branch, agentName, model, reasoning)
+		job, err = s.db.EnqueueJob(storage.EnqueueOpts{
+			RepoID:     repo.ID,
+			GitRef:     fullRef,
+			Branch:     req.Branch,
+			Agent:      agentName,
+			Model:      model,
+			Reasoning:  reasoning,
+			ReviewType: req.ReviewType,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue job: %v", err))
 			return
@@ -553,7 +615,16 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		job, err = s.db.EnqueueJob(repo.ID, commit.ID, sha, req.Branch, agentName, model, reasoning)
+		job, err = s.db.EnqueueJob(storage.EnqueueOpts{
+			RepoID:     repo.ID,
+			CommitID:   commit.ID,
+			GitRef:     sha,
+			Branch:     req.Branch,
+			Agent:      agentName,
+			Model:      model,
+			Reasoning:  reasoning,
+			ReviewType: req.ReviewType,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue job: %v", err))
 			return
@@ -700,6 +771,45 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 		"repos":       repos,
 		"total_count": totalCount,
 	})
+}
+
+func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		RepoPath string `json:"repo_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.RepoPath == "" {
+		writeError(w, http.StatusBadRequest, "repo_path is required")
+		return
+	}
+
+	// Resolve to main repo root (handles worktrees)
+	repoRoot, err := git.GetMainRepoRoot(req.RepoPath)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("not a git repository: %v", err))
+		return
+	}
+
+	// Resolve repo identity for sync
+	repoIdentity := config.ResolveRepoIdentity(repoRoot, nil)
+
+	// Persist (idempotent — UNIQUE on root_path)
+	repo, err := s.db.GetOrCreateRepo(repoRoot, repoIdentity)
+	if err != nil {
+		s.writeInternalError(w, fmt.Sprintf("register repo: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, repo)
 }
 
 func (s *Server) handleListBranches(w http.ResponseWriter, r *http.Request) {

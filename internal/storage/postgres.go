@@ -14,12 +14,12 @@ import (
 )
 
 // PostgreSQL schema version - increment when schema changes
-const pgSchemaVersion = 3
+const pgSchemaVersion = 4
 
 // pgSchemaName is the PostgreSQL schema used to isolate roborev tables
 const pgSchemaName = "roborev"
 
-//go:embed schemas/postgres_v3.sql
+//go:embed schemas/postgres_v4.sql
 var pgSchemaSQL string
 
 // pgSchemaStatements returns the individual DDL statements for schema creation.
@@ -178,6 +178,10 @@ func (p *PgPool) EnsureSchema(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("create branch index: %w", err)
 		}
+		_, err = p.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_review_jobs_job_type ON review_jobs(job_type)`)
+		if err != nil {
+			return fmt.Errorf("create job_type index: %w", err)
+		}
 	} else if currentVersion > pgSchemaVersion {
 		return fmt.Errorf("database schema version %d is newer than supported version %d", currentVersion, pgSchemaVersion)
 	} else if currentVersion < pgSchemaVersion {
@@ -199,6 +203,36 @@ func (p *PgPool) EnsureSchema(ctx context.Context) error {
 			_, err = p.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_review_jobs_branch ON review_jobs(branch)`)
 			if err != nil {
 				return fmt.Errorf("migrate to v3 (add branch index): %w", err)
+			}
+		}
+		if currentVersion < 4 {
+			// Migration 3->4: Add job_type column to review_jobs
+			_, err = p.pool.Exec(ctx, `ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'review'`)
+			if err != nil {
+				return fmt.Errorf("migrate to v4 (add job_type column): %w", err)
+			}
+			// Backfill job_type for existing rows
+			_, err = p.pool.Exec(ctx, `UPDATE review_jobs SET job_type = 'dirty' WHERE (git_ref = 'dirty' OR diff_content IS NOT NULL) AND job_type = 'review'`)
+			if err != nil {
+				return fmt.Errorf("migrate to v4 (backfill dirty): %w", err)
+			}
+			_, err = p.pool.Exec(ctx, `UPDATE review_jobs SET job_type = 'range' WHERE git_ref LIKE '%..%' AND commit_id IS NULL AND job_type = 'review'`)
+			if err != nil {
+				return fmt.Errorf("migrate to v4 (backfill range): %w", err)
+			}
+			_, err = p.pool.Exec(ctx, `UPDATE review_jobs SET job_type = 'task' WHERE commit_id IS NULL AND diff_content IS NULL AND git_ref != 'dirty' AND git_ref NOT LIKE '%..%' AND git_ref != '' AND job_type = 'review'`)
+			if err != nil {
+				return fmt.Errorf("migrate to v4 (backfill task): %w", err)
+			}
+			// Add index for job_type filtering
+			_, err = p.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_review_jobs_job_type ON review_jobs(job_type)`)
+			if err != nil {
+				return fmt.Errorf("migrate to v4 (add job_type index): %w", err)
+			}
+			// Add review_type column
+			_, err = p.pool.Exec(ctx, `ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS review_type TEXT NOT NULL DEFAULT ''`)
+			if err != nil {
+				return fmt.Errorf("migrate to v4 (add review_type column): %w", err)
 			}
 		}
 		// Update version
@@ -441,10 +475,10 @@ func (p *PgPool) Tx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 func (p *PgPool) UpsertJob(ctx context.Context, j SyncableJob, pgRepoID int64, pgCommitID *int64) error {
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO review_jobs (
-			uuid, repo_id, commit_id, git_ref, agent, model, reasoning, status, agentic,
+			uuid, repo_id, commit_id, git_ref, agent, model, reasoning, job_type, review_type, status, agentic,
 			enqueued_at, started_at, finished_at, prompt, diff_content, error,
 			source_machine_id, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
 		ON CONFLICT (uuid) DO UPDATE SET
 			status = EXCLUDED.status,
 			finished_at = EXCLUDED.finished_at,
@@ -452,7 +486,7 @@ func (p *PgPool) UpsertJob(ctx context.Context, j SyncableJob, pgRepoID int64, p
 			model = COALESCE(EXCLUDED.model, review_jobs.model),
 			updated_at = NOW()
 	`, j.UUID, pgRepoID, pgCommitID, j.GitRef, j.Agent, nullString(j.Model), nullString(j.Reasoning),
-		j.Status, j.Agentic, j.EnqueuedAt, j.StartedAt, j.FinishedAt,
+		defaultStr(j.JobType, "review"), j.ReviewType, j.Status, j.Agentic, j.EnqueuedAt, j.StartedAt, j.FinishedAt,
 		nullString(j.Prompt), j.DiffContent, nullString(j.Error), j.SourceMachineID)
 	return err
 }
@@ -496,6 +530,8 @@ type PulledJob struct {
 	Agent           string
 	Model           string
 	Reasoning       string
+	JobType         string
+	ReviewType      string
 	Status          string
 	Agentic         bool
 	EnqueuedAt      time.Time
@@ -526,7 +562,7 @@ func (p *PgPool) PullJobs(ctx context.Context, excludeMachineID string, cursor s
 	rows, err := p.pool.Query(ctx, `
 		SELECT
 			j.uuid, r.identity, COALESCE(c.sha, ''), COALESCE(c.author, ''), COALESCE(c.subject, ''), COALESCE(c.timestamp, '1970-01-01'::timestamptz),
-			j.git_ref, j.agent, COALESCE(j.model, ''), COALESCE(j.reasoning, ''), j.status, j.agentic,
+			j.git_ref, j.agent, COALESCE(j.model, ''), COALESCE(j.reasoning, ''), COALESCE(j.job_type, 'review'), COALESCE(j.review_type, ''), j.status, j.agentic,
 			j.enqueued_at, j.started_at, j.finished_at,
 			COALESCE(j.prompt, ''), j.diff_content, COALESCE(j.error, ''),
 			j.source_machine_id, j.updated_at, j.id
@@ -553,7 +589,7 @@ func (p *PgPool) PullJobs(ctx context.Context, excludeMachineID string, cursor s
 
 		err := rows.Scan(
 			&j.UUID, &j.RepoIdentity, &j.CommitSHA, &j.CommitAuthor, &j.CommitSubject, &j.CommitTimestamp,
-			&j.GitRef, &j.Agent, &j.Model, &j.Reasoning, &j.Status, &j.Agentic,
+			&j.GitRef, &j.Agent, &j.Model, &j.Reasoning, &j.JobType, &j.ReviewType, &j.Status, &j.Agentic,
 			&j.EnqueuedAt, &j.StartedAt, &j.FinishedAt,
 			&j.Prompt, &diffContent, &j.Error,
 			&j.SourceMachineID, &j.UpdatedAt, &lastID,
@@ -716,6 +752,15 @@ func nullString(s string) interface{} {
 	return s
 }
 
+// defaultStr returns s if non-empty, otherwise returns the default.
+// Used for NOT NULL columns that should never be nil.
+func defaultStr(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
 // BatchUpsertReviews inserts or updates multiple reviews in a single batch operation.
 // Returns a boolean slice indicating success/failure for each item at the corresponding index.
 func (p *PgPool) BatchUpsertReviews(ctx context.Context, reviews []SyncableReview) ([]bool, error) {
@@ -813,17 +858,17 @@ func (p *PgPool) BatchUpsertJobs(ctx context.Context, jobs []JobWithPgIDs) ([]bo
 		j := jw.Job
 		batch.Queue(`
 			INSERT INTO review_jobs (
-				uuid, repo_id, commit_id, git_ref, agent, reasoning, status, agentic,
+				uuid, repo_id, commit_id, git_ref, agent, reasoning, job_type, review_type, status, agentic,
 				enqueued_at, started_at, finished_at, prompt, diff_content, error,
 				source_machine_id, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
 			ON CONFLICT (uuid) DO UPDATE SET
 				status = EXCLUDED.status,
 				finished_at = EXCLUDED.finished_at,
 				error = EXCLUDED.error,
 				updated_at = NOW()
 		`, j.UUID, jw.PgRepoID, jw.PgCommitID, j.GitRef, j.Agent, nullString(j.Reasoning),
-			j.Status, j.Agentic, j.EnqueuedAt, j.StartedAt, j.FinishedAt,
+			defaultStr(j.JobType, "review"), j.ReviewType, j.Status, j.Agentic, j.EnqueuedAt, j.StartedAt, j.FinishedAt,
 			nullString(j.Prompt), j.DiffContent, nullString(j.Error), j.SourceMachineID)
 	}
 

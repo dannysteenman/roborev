@@ -29,31 +29,39 @@ type Config struct {
 	JobTimeoutMinutes  int    `toml:"job_timeout_minutes"`
 
 	// Workflow-specific agent/model configuration
-	ReviewAgent         string `toml:"review_agent"`
-	ReviewAgentFast     string `toml:"review_agent_fast"`
-	ReviewAgentStandard string `toml:"review_agent_standard"`
-	ReviewAgentThorough string `toml:"review_agent_thorough"`
-	RefineAgent         string `toml:"refine_agent"`
-	RefineAgentFast     string `toml:"refine_agent_fast"`
-	RefineAgentStandard string `toml:"refine_agent_standard"`
-	RefineAgentThorough string `toml:"refine_agent_thorough"`
-	ReviewModel         string `toml:"review_model"`
-	ReviewModelFast     string `toml:"review_model_fast"`
-	ReviewModelStandard string `toml:"review_model_standard"`
-	ReviewModelThorough string `toml:"review_model_thorough"`
-	RefineModel         string `toml:"refine_model"`
-	RefineModelFast     string `toml:"refine_model_fast"`
-	RefineModelStandard string `toml:"refine_model_standard"`
-	RefineModelThorough string `toml:"refine_model_thorough"`
-	FixAgent            string `toml:"fix_agent"`
-	FixAgentFast        string `toml:"fix_agent_fast"`
-	FixAgentStandard    string `toml:"fix_agent_standard"`
-	FixAgentThorough    string `toml:"fix_agent_thorough"`
-	FixModel            string `toml:"fix_model"`
-	FixModelFast        string `toml:"fix_model_fast"`
-	FixModelStandard    string `toml:"fix_model_standard"`
-	FixModelThorough    string `toml:"fix_model_thorough"`
-	AllowUnsafeAgents   *bool  `toml:"allow_unsafe_agents"` // nil = not set, allows commands to choose their own default
+	ReviewAgent           string `toml:"review_agent"`
+	ReviewAgentFast       string `toml:"review_agent_fast"`
+	ReviewAgentStandard   string `toml:"review_agent_standard"`
+	ReviewAgentThorough   string `toml:"review_agent_thorough"`
+	RefineAgent           string `toml:"refine_agent"`
+	RefineAgentFast       string `toml:"refine_agent_fast"`
+	RefineAgentStandard   string `toml:"refine_agent_standard"`
+	RefineAgentThorough   string `toml:"refine_agent_thorough"`
+	ReviewModel           string `toml:"review_model"`
+	ReviewModelFast       string `toml:"review_model_fast"`
+	ReviewModelStandard   string `toml:"review_model_standard"`
+	ReviewModelThorough   string `toml:"review_model_thorough"`
+	RefineModel           string `toml:"refine_model"`
+	RefineModelFast       string `toml:"refine_model_fast"`
+	RefineModelStandard   string `toml:"refine_model_standard"`
+	RefineModelThorough   string `toml:"refine_model_thorough"`
+	FixAgent              string `toml:"fix_agent"`
+	FixAgentFast          string `toml:"fix_agent_fast"`
+	FixAgentStandard      string `toml:"fix_agent_standard"`
+	FixAgentThorough      string `toml:"fix_agent_thorough"`
+	FixModel              string `toml:"fix_model"`
+	FixModelFast          string `toml:"fix_model_fast"`
+	FixModelStandard      string `toml:"fix_model_standard"`
+	FixModelThorough      string `toml:"fix_model_thorough"`
+	SecurityAgent         string `toml:"security_agent"`
+	SecurityAgentFast     string `toml:"security_agent_fast"`
+	SecurityAgentStandard string `toml:"security_agent_standard"`
+	SecurityAgentThorough string `toml:"security_agent_thorough"`
+	SecurityModel         string `toml:"security_model"`
+	SecurityModelFast     string `toml:"security_model_fast"`
+	SecurityModelStandard string `toml:"security_model_standard"`
+	SecurityModelThorough string `toml:"security_model_thorough"`
+	AllowUnsafeAgents     *bool  `toml:"allow_unsafe_agents"` // nil = not set, allows commands to choose their own default
 
 	// Agent commands
 	CodexCmd      string `toml:"codex_cmd"`
@@ -69,8 +77,139 @@ type Config struct {
 	// Sync configuration for PostgreSQL
 	Sync SyncConfig `toml:"sync"`
 
+	// CI poller configuration
+	CI CIConfig `toml:"ci"`
+
 	// Analysis settings
 	DefaultMaxPromptSize int `toml:"default_max_prompt_size"` // Max prompt size in bytes before falling back to paths (default: 200KB)
+}
+
+// CIConfig holds configuration for the CI poller that watches GitHub PRs
+type CIConfig struct {
+	// Enabled enables the CI poller
+	Enabled bool `toml:"enabled"`
+
+	// PollInterval is how often to poll for PRs (e.g., "5m", "10m"). Default: 5m
+	PollInterval string `toml:"poll_interval"`
+
+	// Repos is the list of GitHub repos to poll in "owner/repo" format
+	Repos []string `toml:"repos"`
+
+	// ReviewTypes is the list of review types to run for each PR (e.g., ["security", "review"]).
+	// Defaults to ["security"] if empty.
+	ReviewTypes []string `toml:"review_types"`
+
+	// Agents is the list of agents to run for each PR (e.g., ["codex", "gemini"]).
+	// Defaults to auto-detection if empty.
+	Agents []string `toml:"agents"`
+
+	// Model overrides the model for CI reviews (empty = use workflow resolution)
+	Model string `toml:"model"`
+
+	// SynthesisAgent is the agent used to synthesize multiple review outputs into one comment.
+	// Defaults to the first available agent.
+	SynthesisAgent string `toml:"synthesis_agent"`
+
+	// SynthesisModel overrides the model used for synthesis.
+	SynthesisModel string `toml:"synthesis_model"`
+
+	// MinSeverity filters out findings below this severity level during synthesis.
+	// Valid values: critical, high, medium, low. Empty means no filter (include all).
+	MinSeverity string `toml:"min_severity"`
+
+	// GitHub App authentication (optional — comments appear as bot instead of personal account)
+	GitHubAppID             int64  `toml:"github_app_id"`
+	GitHubAppPrivateKey     string `toml:"github_app_private_key"` // PEM file path or inline; supports ${ENV_VAR}
+	GitHubAppInstallationID int64  `toml:"github_app_installation_id"`
+
+	// Multi-installation: map of owner → installation_id
+	GitHubAppInstallations map[string]int64 `toml:"github_app_installations"`
+}
+
+// ResolvedReviewTypes returns the list of review types to use.
+// Defaults to ["security"] if empty.
+func (c *CIConfig) ResolvedReviewTypes() []string {
+	if len(c.ReviewTypes) > 0 {
+		return c.ReviewTypes
+	}
+	return []string{"security"}
+}
+
+// ResolvedAgents returns the list of agents to use.
+// Defaults to [""] (empty = auto-detect) if empty.
+func (c *CIConfig) ResolvedAgents() []string {
+	if len(c.Agents) > 0 {
+		return c.Agents
+	}
+	return []string{""}
+}
+
+// GitHubAppConfigured returns true if GitHub App authentication can be used.
+// Requires app ID, private key, and at least one installation ID (singular or map).
+func (c *CIConfig) GitHubAppConfigured() bool {
+	return c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "" &&
+		(c.GitHubAppInstallationID != 0 || len(c.GitHubAppInstallations) > 0)
+}
+
+// InstallationIDForOwner returns the installation ID for a GitHub owner.
+// Checks the normalized installations map first (skipping non-positive values),
+// then falls back to the singular field. Owner comparison is case-insensitive.
+func (c *CIConfig) InstallationIDForOwner(owner string) int64 {
+	if id, ok := c.GitHubAppInstallations[strings.ToLower(owner)]; ok && id > 0 {
+		return id
+	}
+	return c.GitHubAppInstallationID
+}
+
+// NormalizeInstallations lowercases all keys in GitHubAppInstallations
+// so lookups are case-insensitive via direct map access.
+// Returns an error if two keys collide after lowercasing (e.g., "wesm" and "Wesm").
+func (c *CIConfig) NormalizeInstallations() error {
+	if len(c.GitHubAppInstallations) == 0 {
+		return nil
+	}
+	normalized := make(map[string]int64, len(c.GitHubAppInstallations))
+	for k, v := range c.GitHubAppInstallations {
+		lower := strings.ToLower(k)
+		if _, exists := normalized[lower]; exists {
+			return fmt.Errorf("case-colliding github_app_installations keys for %q", lower)
+		}
+		normalized[lower] = v
+	}
+	c.GitHubAppInstallations = normalized
+	return nil
+}
+
+// GitHubAppPrivateKeyResolved expands env vars in the private key value,
+// reads the file if it's a path, and returns the PEM content.
+func (c *CIConfig) GitHubAppPrivateKeyResolved() (string, error) {
+	val := os.ExpandEnv(c.GitHubAppPrivateKey)
+	if val == "" {
+		return "", fmt.Errorf("github_app_private_key is empty after expansion")
+	}
+
+	// If it looks like PEM content, return directly
+	// TrimSpace handles leading whitespace/newlines in inline PEM content
+	trimmed := strings.TrimSpace(val)
+	if strings.HasPrefix(trimmed, "-----BEGIN") {
+		return trimmed, nil
+	}
+
+	// Expand leading ~ to home directory
+	if strings.HasPrefix(val, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home for github_app_private_key: %w", err)
+		}
+		val = home + val[1:]
+	}
+
+	// Otherwise treat as file path
+	data, err := os.ReadFile(val)
+	if err != nil {
+		return "", fmt.Errorf("read private key file %s: %w", val, err)
+	}
+	return string(data), nil
 }
 
 // SyncConfig holds configuration for PostgreSQL sync
@@ -147,6 +286,22 @@ func (c *SyncConfig) Validate() []string {
 	return warnings
 }
 
+// RepoCIConfig holds per-repo CI overrides (used by the CI poller for this repo).
+// These override the global [ci] settings when reviewing this specific repo.
+type RepoCIConfig struct {
+	// Agents overrides the list of agents for CI reviews of this repo.
+	Agents []string `toml:"agents"`
+
+	// ReviewTypes overrides the list of review types for CI reviews of this repo.
+	ReviewTypes []string `toml:"review_types"`
+
+	// Reasoning overrides the reasoning level for CI reviews (thorough, standard, fast).
+	Reasoning string `toml:"reasoning"`
+
+	// MinSeverity overrides the minimum severity filter for CI synthesis.
+	MinSeverity string `toml:"min_severity"`
+}
+
 // RepoConfig holds per-repo overrides
 type RepoConfig struct {
 	Agent              string   `toml:"agent"`
@@ -160,31 +315,42 @@ type RepoConfig struct {
 	RefineReasoning    string   `toml:"refine_reasoning"` // Reasoning level for refine: thorough, standard, fast
 	FixReasoning       string   `toml:"fix_reasoning"`    // Reasoning level for fix: thorough, standard, fast
 
+	// CI-specific overrides (used by CI poller for this repo)
+	CI RepoCIConfig `toml:"ci"`
+
 	// Workflow-specific agent/model configuration
-	ReviewAgent         string `toml:"review_agent"`
-	ReviewAgentFast     string `toml:"review_agent_fast"`
-	ReviewAgentStandard string `toml:"review_agent_standard"`
-	ReviewAgentThorough string `toml:"review_agent_thorough"`
-	RefineAgent         string `toml:"refine_agent"`
-	RefineAgentFast     string `toml:"refine_agent_fast"`
-	RefineAgentStandard string `toml:"refine_agent_standard"`
-	RefineAgentThorough string `toml:"refine_agent_thorough"`
-	ReviewModel         string `toml:"review_model"`
-	ReviewModelFast     string `toml:"review_model_fast"`
-	ReviewModelStandard string `toml:"review_model_standard"`
-	ReviewModelThorough string `toml:"review_model_thorough"`
-	RefineModel         string `toml:"refine_model"`
-	RefineModelFast     string `toml:"refine_model_fast"`
-	RefineModelStandard string `toml:"refine_model_standard"`
-	RefineModelThorough string `toml:"refine_model_thorough"`
-	FixAgent            string `toml:"fix_agent"`
-	FixAgentFast        string `toml:"fix_agent_fast"`
-	FixAgentStandard    string `toml:"fix_agent_standard"`
-	FixAgentThorough    string `toml:"fix_agent_thorough"`
-	FixModel            string `toml:"fix_model"`
-	FixModelFast        string `toml:"fix_model_fast"`
-	FixModelStandard    string `toml:"fix_model_standard"`
-	FixModelThorough    string `toml:"fix_model_thorough"`
+	ReviewAgent           string `toml:"review_agent"`
+	ReviewAgentFast       string `toml:"review_agent_fast"`
+	ReviewAgentStandard   string `toml:"review_agent_standard"`
+	ReviewAgentThorough   string `toml:"review_agent_thorough"`
+	RefineAgent           string `toml:"refine_agent"`
+	RefineAgentFast       string `toml:"refine_agent_fast"`
+	RefineAgentStandard   string `toml:"refine_agent_standard"`
+	RefineAgentThorough   string `toml:"refine_agent_thorough"`
+	ReviewModel           string `toml:"review_model"`
+	ReviewModelFast       string `toml:"review_model_fast"`
+	ReviewModelStandard   string `toml:"review_model_standard"`
+	ReviewModelThorough   string `toml:"review_model_thorough"`
+	RefineModel           string `toml:"refine_model"`
+	RefineModelFast       string `toml:"refine_model_fast"`
+	RefineModelStandard   string `toml:"refine_model_standard"`
+	RefineModelThorough   string `toml:"refine_model_thorough"`
+	FixAgent              string `toml:"fix_agent"`
+	FixAgentFast          string `toml:"fix_agent_fast"`
+	FixAgentStandard      string `toml:"fix_agent_standard"`
+	FixAgentThorough      string `toml:"fix_agent_thorough"`
+	FixModel              string `toml:"fix_model"`
+	FixModelFast          string `toml:"fix_model_fast"`
+	FixModelStandard      string `toml:"fix_model_standard"`
+	FixModelThorough      string `toml:"fix_model_thorough"`
+	SecurityAgent         string `toml:"security_agent"`
+	SecurityAgentFast     string `toml:"security_agent_fast"`
+	SecurityAgentStandard string `toml:"security_agent_standard"`
+	SecurityAgentThorough string `toml:"security_agent_thorough"`
+	SecurityModel         string `toml:"security_model"`
+	SecurityModelFast     string `toml:"security_model_fast"`
+	SecurityModelStandard string `toml:"security_model_standard"`
+	SecurityModelThorough string `toml:"security_model_thorough"`
 
 	// Hooks configuration (per-repo)
 	Hooks []HookConfig `toml:"hooks"`
@@ -237,6 +403,10 @@ func LoadGlobalFrom(path string) (*Config, error) {
 
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		return nil, err
+	}
+
+	if err := cfg.CI.NormalizeInstallations(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	return cfg, nil
@@ -318,7 +488,10 @@ func GetDisplayName(repoPath string) string {
 	return repoCfg.DisplayName
 }
 
-func normalizeReasoning(value string) (string, error) {
+// NormalizeReasoning validates and normalizes a reasoning level string.
+// Returns the canonical form (thorough, standard, fast) or an error if invalid.
+// Returns empty string (no error) for empty input.
+func NormalizeReasoning(value string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	if normalized == "" {
 		return "", nil
@@ -336,15 +509,32 @@ func normalizeReasoning(value string) (string, error) {
 	}
 }
 
+// NormalizeMinSeverity validates and normalizes a minimum severity level string.
+// Returns the canonical form (critical, high, medium, low) or an error if invalid.
+// Returns empty string (no error) for empty input.
+func NormalizeMinSeverity(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return "", nil
+	}
+
+	switch normalized {
+	case "critical", "high", "medium", "low":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid min_severity level: %q (valid: critical, high, medium, low)", value)
+	}
+}
+
 // ResolveReviewReasoning determines reasoning level for reviews.
 // Priority: explicit > per-repo config > default (thorough)
 func ResolveReviewReasoning(explicit string, repoPath string) (string, error) {
 	if strings.TrimSpace(explicit) != "" {
-		return normalizeReasoning(explicit)
+		return NormalizeReasoning(explicit)
 	}
 
 	if repoCfg, err := LoadRepoConfig(repoPath); err == nil && repoCfg != nil && strings.TrimSpace(repoCfg.ReviewReasoning) != "" {
-		return normalizeReasoning(repoCfg.ReviewReasoning)
+		return NormalizeReasoning(repoCfg.ReviewReasoning)
 	}
 
 	return "thorough", nil // Default for reviews: deep analysis
@@ -354,11 +544,11 @@ func ResolveReviewReasoning(explicit string, repoPath string) (string, error) {
 // Priority: explicit > per-repo config > default (standard)
 func ResolveRefineReasoning(explicit string, repoPath string) (string, error) {
 	if strings.TrimSpace(explicit) != "" {
-		return normalizeReasoning(explicit)
+		return NormalizeReasoning(explicit)
 	}
 
 	if repoCfg, err := LoadRepoConfig(repoPath); err == nil && repoCfg != nil && strings.TrimSpace(repoCfg.RefineReasoning) != "" {
-		return normalizeReasoning(repoCfg.RefineReasoning)
+		return NormalizeReasoning(repoCfg.RefineReasoning)
 	}
 
 	return "standard", nil // Default for refine: balanced analysis
@@ -368,11 +558,11 @@ func ResolveRefineReasoning(explicit string, repoPath string) (string, error) {
 // Priority: explicit > per-repo config > default (standard)
 func ResolveFixReasoning(explicit string, repoPath string) (string, error) {
 	if strings.TrimSpace(explicit) != "" {
-		return normalizeReasoning(explicit)
+		return NormalizeReasoning(explicit)
 	}
 
 	if repoCfg, err := LoadRepoConfig(repoPath); err == nil && repoCfg != nil && strings.TrimSpace(repoCfg.FixReasoning) != "" {
-		return normalizeReasoning(repoCfg.FixReasoning)
+		return NormalizeReasoning(repoCfg.FixReasoning)
 	}
 
 	return "standard", nil // Default for fix: balanced analysis
@@ -515,6 +705,14 @@ func repoWorkflowField(r *RepoConfig, workflow, level string, isAgent bool) stri
 			v = r.FixAgentThorough
 		case "fix_":
 			v = r.FixAgent
+		case "security_fast":
+			v = r.SecurityAgentFast
+		case "security_standard":
+			v = r.SecurityAgentStandard
+		case "security_thorough":
+			v = r.SecurityAgentThorough
+		case "security_":
+			v = r.SecurityAgent
 		}
 	} else {
 		switch workflow + "_" + level {
@@ -542,6 +740,14 @@ func repoWorkflowField(r *RepoConfig, workflow, level string, isAgent bool) stri
 			v = r.FixModelThorough
 		case "fix_":
 			v = r.FixModel
+		case "security_fast":
+			v = r.SecurityModelFast
+		case "security_standard":
+			v = r.SecurityModelStandard
+		case "security_thorough":
+			v = r.SecurityModelThorough
+		case "security_":
+			v = r.SecurityModel
 		}
 	}
 	return strings.TrimSpace(v)
@@ -578,6 +784,14 @@ func globalWorkflowField(g *Config, workflow, level string, isAgent bool) string
 			v = g.FixAgentThorough
 		case "fix_":
 			v = g.FixAgent
+		case "security_fast":
+			v = g.SecurityAgentFast
+		case "security_standard":
+			v = g.SecurityAgentStandard
+		case "security_thorough":
+			v = g.SecurityAgentThorough
+		case "security_":
+			v = g.SecurityAgent
 		}
 	} else {
 		switch workflow + "_" + level {
@@ -605,6 +819,14 @@ func globalWorkflowField(g *Config, workflow, level string, isAgent bool) string
 			v = g.FixModelThorough
 		case "fix_":
 			v = g.FixModel
+		case "security_fast":
+			v = g.SecurityModelFast
+		case "security_standard":
+			v = g.SecurityModelStandard
+		case "security_thorough":
+			v = g.SecurityModelThorough
+		case "security_":
+			v = g.SecurityModel
 		}
 	}
 	return strings.TrimSpace(v)
@@ -717,8 +939,12 @@ func stripURLCredentials(rawURL string) string {
 		return rawURL
 	}
 
-	// If there's no scheme, it's likely an SSH URL (git@...) - return as-is
+	// If there's no scheme, it's likely an SCP-style URL (git@host:repo.git).
+	// Strip any credentials (user:pass@host:repo → host:repo).
 	if parsed.Scheme == "" {
+		if at := strings.Index(rawURL, "@"); at >= 0 {
+			return rawURL[at+1:]
+		}
 		return rawURL
 	}
 

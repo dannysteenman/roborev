@@ -1306,6 +1306,355 @@ func buildGlobalConfig(cfg map[string]string) *Config {
 	return c
 }
 
+func TestResolvedReviewTypes(t *testing.T) {
+	t.Run("uses configured types", func(t *testing.T) {
+		ci := CIConfig{ReviewTypes: []string{"security", "review"}}
+		got := ci.ResolvedReviewTypes()
+		if len(got) != 2 || got[0] != "security" || got[1] != "review" {
+			t.Errorf("got %v, want [security review]", got)
+		}
+	})
+
+	t.Run("defaults to security", func(t *testing.T) {
+		ci := CIConfig{}
+		got := ci.ResolvedReviewTypes()
+		if len(got) != 1 || got[0] != "security" {
+			t.Errorf("got %v, want [security]", got)
+		}
+	})
+}
+
+func TestResolvedAgents(t *testing.T) {
+	t.Run("uses configured agents", func(t *testing.T) {
+		ci := CIConfig{Agents: []string{"codex", "gemini"}}
+		got := ci.ResolvedAgents()
+		if len(got) != 2 || got[0] != "codex" || got[1] != "gemini" {
+			t.Errorf("got %v, want [codex gemini]", got)
+		}
+	})
+
+	t.Run("defaults to auto-detect", func(t *testing.T) {
+		ci := CIConfig{}
+		got := ci.ResolvedAgents()
+		if len(got) != 1 || got[0] != "" {
+			t.Errorf("got %v, want [\"\"]", got)
+		}
+	})
+}
+
+func TestNormalizeMinSeverity(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"critical", "critical", false},
+		{"high", "high", false},
+		{"medium", "medium", false},
+		{"low", "low", false},
+		{"CRITICAL", "critical", false},
+		{"  High  ", "high", false},
+		{"Medium", "medium", false},
+		{"invalid", "", true},
+		{"thorough", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run("input_"+tt.input, func(t *testing.T) {
+			got, err := NormalizeMinSeverity(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NormalizeMinSeverity(%q) error = %v, wantErr = %v", tt.input, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("NormalizeMinSeverity(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRepoCIConfig(t *testing.T) {
+	t.Run("parses agents and review_types", func(t *testing.T) {
+		tmpDir := newTempRepo(t, `
+agent = "codex"
+
+[ci]
+agents = ["gemini", "claude"]
+review_types = ["security", "review"]
+reasoning = "standard"
+`)
+		cfg, err := LoadRepoConfig(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadRepoConfig: %v", err)
+		}
+		if len(cfg.CI.Agents) != 2 || cfg.CI.Agents[0] != "gemini" || cfg.CI.Agents[1] != "claude" {
+			t.Errorf("got agents %v, want [gemini claude]", cfg.CI.Agents)
+		}
+		if len(cfg.CI.ReviewTypes) != 2 || cfg.CI.ReviewTypes[0] != "security" || cfg.CI.ReviewTypes[1] != "review" {
+			t.Errorf("got review_types %v, want [security review]", cfg.CI.ReviewTypes)
+		}
+		if cfg.CI.Reasoning != "standard" {
+			t.Errorf("got reasoning %q, want %q", cfg.CI.Reasoning, "standard")
+		}
+	})
+
+	t.Run("empty CI section", func(t *testing.T) {
+		tmpDir := newTempRepo(t, `agent = "codex"`)
+		cfg, err := LoadRepoConfig(tmpDir)
+		if err != nil {
+			t.Fatalf("LoadRepoConfig: %v", err)
+		}
+		if len(cfg.CI.Agents) != 0 {
+			t.Errorf("got agents %v, want empty", cfg.CI.Agents)
+		}
+		if len(cfg.CI.ReviewTypes) != 0 {
+			t.Errorf("got review_types %v, want empty", cfg.CI.ReviewTypes)
+		}
+		if cfg.CI.Reasoning != "" {
+			t.Errorf("got reasoning %q, want empty", cfg.CI.Reasoning)
+		}
+	})
+}
+
+func TestInstallationIDForOwner(t *testing.T) {
+	t.Run("map lookup", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppInstallations: map[string]int64{
+				"wesm":        111111,
+				"roborev-dev": 222222,
+			},
+			GitHubAppInstallationID: 999999,
+		}
+		if got := ci.InstallationIDForOwner("wesm"); got != 111111 {
+			t.Errorf("got %d, want 111111", got)
+		}
+		if got := ci.InstallationIDForOwner("roborev-dev"); got != 222222 {
+			t.Errorf("got %d, want 222222", got)
+		}
+	})
+
+	t.Run("falls back to singular", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppInstallations:  map[string]int64{"wesm": 111111},
+			GitHubAppInstallationID: 999999,
+		}
+		if got := ci.InstallationIDForOwner("unknown-org"); got != 999999 {
+			t.Errorf("got %d, want 999999", got)
+		}
+	})
+
+	t.Run("zero when unset", func(t *testing.T) {
+		ci := CIConfig{}
+		if got := ci.InstallationIDForOwner("wesm"); got != 0 {
+			t.Errorf("got %d, want 0", got)
+		}
+	})
+
+	t.Run("zero mapped value falls back to singular", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppInstallations:  map[string]int64{"wesm": 0},
+			GitHubAppInstallationID: 999999,
+		}
+		if got := ci.InstallationIDForOwner("wesm"); got != 999999 {
+			t.Errorf("got %d, want 999999 (fallback to singular)", got)
+		}
+	})
+
+	t.Run("case-insensitive lookup after normalization", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppInstallations: map[string]int64{"Wesm": 111111, "RoboRev-Dev": 222222},
+		}
+		if err := ci.NormalizeInstallations(); err != nil {
+			t.Fatalf("NormalizeInstallations: %v", err)
+		}
+		if got := ci.InstallationIDForOwner("wesm"); got != 111111 {
+			t.Errorf("got %d, want 111111", got)
+		}
+		if got := ci.InstallationIDForOwner("WESM"); got != 111111 {
+			t.Errorf("got %d, want 111111", got)
+		}
+		if got := ci.InstallationIDForOwner("roborev-dev"); got != 222222 {
+			t.Errorf("got %d, want 222222", got)
+		}
+	})
+}
+
+func TestNormalizeInstallations(t *testing.T) {
+	t.Run("lowercases keys", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppInstallations: map[string]int64{"Wesm": 111111, "RoboRev-Dev": 222222},
+		}
+		if err := ci.NormalizeInstallations(); err != nil {
+			t.Fatalf("NormalizeInstallations: %v", err)
+		}
+		if _, ok := ci.GitHubAppInstallations["wesm"]; !ok {
+			t.Error("expected lowercase key 'wesm' after normalization")
+		}
+		if _, ok := ci.GitHubAppInstallations["roborev-dev"]; !ok {
+			t.Error("expected lowercase key 'roborev-dev' after normalization")
+		}
+		if _, ok := ci.GitHubAppInstallations["Wesm"]; ok {
+			t.Error("original mixed-case key 'Wesm' should not exist after normalization")
+		}
+	})
+
+	t.Run("noop on nil map", func(t *testing.T) {
+		ci := CIConfig{}
+		if err := ci.NormalizeInstallations(); err != nil {
+			t.Fatalf("NormalizeInstallations on nil map: %v", err)
+		}
+	})
+
+	t.Run("case-colliding keys returns error", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppInstallations: map[string]int64{"wesm": 111111, "Wesm": 222222},
+		}
+		err := ci.NormalizeInstallations()
+		if err == nil {
+			t.Fatal("expected error for case-colliding keys")
+		}
+		if !strings.Contains(err.Error(), "case-colliding") {
+			t.Errorf("expected case-colliding error, got: %v", err)
+		}
+	})
+}
+
+func TestLoadGlobalFrom_NormalizesInstallations(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`
+[ci]
+github_app_id = 12345
+github_app_private_key = "~/.roborev/app.pem"
+
+[ci.github_app_installations]
+Wesm = 111111
+RoboRev-Dev = 222222
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobalFrom(configPath)
+	if err != nil {
+		t.Fatalf("LoadGlobalFrom: %v", err)
+	}
+
+	if got := cfg.CI.InstallationIDForOwner("wesm"); got != 111111 {
+		t.Errorf("got %d, want 111111 for normalized 'wesm'", got)
+	}
+	if got := cfg.CI.InstallationIDForOwner("roborev-dev"); got != 222222 {
+		t.Errorf("got %d, want 222222 for normalized 'roborev-dev'", got)
+	}
+}
+
+func TestGitHubAppConfigured_MultiInstall(t *testing.T) {
+	t.Run("configured with map only", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppID:            12345,
+			GitHubAppPrivateKey:    "~/.roborev/app.pem",
+			GitHubAppInstallations: map[string]int64{"wesm": 111111},
+		}
+		if !ci.GitHubAppConfigured() {
+			t.Error("expected GitHubAppConfigured() == true with map only")
+		}
+	})
+
+	t.Run("configured with singular only", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppID:             12345,
+			GitHubAppPrivateKey:     "~/.roborev/app.pem",
+			GitHubAppInstallationID: 111111,
+		}
+		if !ci.GitHubAppConfigured() {
+			t.Error("expected GitHubAppConfigured() == true with singular only")
+		}
+	})
+
+	t.Run("not configured without any installation", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppID:         12345,
+			GitHubAppPrivateKey: "~/.roborev/app.pem",
+		}
+		if ci.GitHubAppConfigured() {
+			t.Error("expected GitHubAppConfigured() == false without any installation ID")
+		}
+	})
+
+	t.Run("not configured without private key", func(t *testing.T) {
+		ci := CIConfig{
+			GitHubAppID:             12345,
+			GitHubAppInstallationID: 111111,
+		}
+		if ci.GitHubAppConfigured() {
+			t.Error("expected GitHubAppConfigured() == false without private key")
+		}
+	})
+}
+
+func TestGitHubAppPrivateKeyResolved_TildeExpansion(t *testing.T) {
+	// Create a temp PEM file
+	dir := t.TempDir()
+	pemFile := filepath.Join(dir, "test.pem")
+	pemContent := "-----BEGIN RSA PRIVATE KEY-----\nfakekey\n-----END RSA PRIVATE KEY-----"
+	if err := os.WriteFile(pemFile, []byte(pemContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("inline PEM returned directly", func(t *testing.T) {
+		ci := CIConfig{GitHubAppPrivateKey: pemContent}
+		got, err := ci.GitHubAppPrivateKeyResolved()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != pemContent {
+			t.Errorf("got %q, want inline PEM", got)
+		}
+	})
+
+	t.Run("absolute path reads file", func(t *testing.T) {
+		ci := CIConfig{GitHubAppPrivateKey: pemFile}
+		got, err := ci.GitHubAppPrivateKeyResolved()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != pemContent {
+			t.Errorf("got %q, want %q", got, pemContent)
+		}
+	})
+
+	t.Run("tilde path expands to home", func(t *testing.T) {
+		// Use a fake HOME so we don't touch the real home directory
+		fakeHome := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		t.Setenv("USERPROFILE", fakeHome) // Windows compatibility
+
+		fakePem := filepath.Join(fakeHome, ".roborev", "test.pem")
+		if err := os.MkdirAll(filepath.Dir(fakePem), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fakePem, []byte(pemContent), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		ci := CIConfig{GitHubAppPrivateKey: "~/.roborev/test.pem"}
+		got, err := ci.GitHubAppPrivateKeyResolved()
+		if err != nil {
+			t.Fatalf("tilde expansion failed: %v", err)
+		}
+		if got != pemContent {
+			t.Errorf("got %q, want %q", got, pemContent)
+		}
+	})
+
+	t.Run("empty after expansion returns error", func(t *testing.T) {
+		ci := CIConfig{GitHubAppPrivateKey: ""}
+		_, err := ci.GitHubAppPrivateKeyResolved()
+		if err == nil {
+			t.Error("expected error for empty key")
+		}
+	})
+}
+
 func TestStripURLCredentials(t *testing.T) {
 	tests := []struct {
 		name     string

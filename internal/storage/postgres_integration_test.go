@@ -140,7 +140,7 @@ func tryCreateCompletedReview(db *DB, repoID int64, sha, author, subject, prompt
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetOrCreateCommit failed: %w", err)
 	}
-	job, err := db.EnqueueJob(repoID, commit.ID, sha, "", "test", "", "")
+	job, err := db.EnqueueJob(EnqueueOpts{RepoID: repoID, CommitID: commit.ID, GitRef: sha, Agent: "test"})
 	if err != nil {
 		return nil, nil, fmt.Errorf("EnqueueJob failed: %w", err)
 	}
@@ -313,8 +313,8 @@ func TestIntegration_PullFromRemote(t *testing.T) {
 
 	remoteJobUUID := "22222222-2222-2222-2222-222222222222"
 	_, err = env.Pool.pool.Exec(env.Ctx, `
-		INSERT INTO roborev.review_jobs (uuid, repo_id, git_ref, status, agent, reasoning, source_machine_id, enqueued_at, created_at, updated_at)
-		VALUES ($1, $2, 'main', 'done', 'test', '', $3, NOW(), NOW(), NOW())
+		INSERT INTO roborev.review_jobs (uuid, repo_id, git_ref, status, agent, reasoning, job_type, review_type, source_machine_id, enqueued_at, created_at, updated_at)
+		VALUES ($1, $2, 'main', 'done', 'test', '', 'review', '', $3, NOW(), NOW(), NOW())
 	`, remoteJobUUID, pgRepoID, remoteMachineUUID)
 	if err != nil {
 		t.Fatalf("Failed to insert job: %v", err)
@@ -346,7 +346,7 @@ func TestIntegration_FinalPush(t *testing.T) {
 	repo, _ := db.GetOrCreateRepo(env.TmpDir, "git@github.com:test/finalpush.git")
 
 	for i := 0; i < 150; i++ {
-		job, err := db.EnqueueRangeJob(repo.ID, "HEAD", "", "test", "", "")
+		job, err := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, GitRef: "HEAD", Agent: "test"})
 		if err != nil {
 			t.Fatalf("EnqueueRangeJob %d failed: %v", i, err)
 		}
@@ -1045,7 +1045,7 @@ func TestIntegration_SyncNowPushesAllBatches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to create commit %d: %v", i, err)
 		}
-		job, err := db.EnqueueJob(repo.ID, commit.ID, fmt.Sprintf("commit%03d", i), "", "test", "", "")
+		job, err := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: fmt.Sprintf("commit%03d", i), Agent: "test"})
 		if err != nil {
 			t.Fatalf("Failed to enqueue job %d: %v", i, err)
 		}

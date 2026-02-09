@@ -33,6 +33,14 @@ const (
 	JobStatusCanceled JobStatus = "canceled"
 )
 
+// JobType classifies what kind of work a review job represents.
+const (
+	JobTypeReview = "review" // Single commit review
+	JobTypeRange  = "range"  // Commit range review
+	JobTypeDirty  = "dirty"  // Uncommitted changes review
+	JobTypeTask   = "task"   // Run/analyze/design/custom prompt
+)
+
 type ReviewJob struct {
 	ID           int64      `json:"id"`
 	RepoID       int64      `json:"repo_id"`
@@ -42,6 +50,7 @@ type ReviewJob struct {
 	Agent        string     `json:"agent"`
 	Model        string     `json:"model,omitempty"`     // Model to use (for opencode: provider/model format)
 	Reasoning    string     `json:"reasoning,omitempty"` // thorough, standard, fast (default: thorough)
+	JobType      string     `json:"job_type"`            // review, range, dirty, task
 	Status       JobStatus  `json:"status"`
 	EnqueuedAt   time.Time  `json:"enqueued_at"`
 	StartedAt    *time.Time `json:"started_at,omitempty"`
@@ -52,6 +61,7 @@ type ReviewJob struct {
 	RetryCount   int        `json:"retry_count"`
 	DiffContent  *string    `json:"diff_content,omitempty"`  // For dirty reviews (uncommitted changes)
 	Agentic      bool       `json:"agentic"`                 // Enable agentic mode (allow file edits)
+	ReviewType   string     `json:"review_type,omitempty"`   // Review type (e.g., "security") - changes system prompt
 	OutputPrefix string     `json:"output_prefix,omitempty"` // Prefix to prepend to review output
 
 	// Sync fields
@@ -68,23 +78,36 @@ type ReviewJob struct {
 	Verdict       *string `json:"verdict,omitempty"`        // P/F parsed from review output
 }
 
+// IsDirtyJob returns true if this is a dirty review (uncommitted changes).
+func (j ReviewJob) IsDirtyJob() bool {
+	if j.JobType != "" {
+		return j.JobType == JobTypeDirty
+	}
+	// Fallback heuristic for jobs without job_type (e.g., from old sync data)
+	return j.DiffContent != nil || j.GitRef == "dirty"
+}
+
 // IsTaskJob returns true if this is a task job (run, analyze, custom label) rather than
 // a commit review or dirty review. Task jobs have pre-stored prompts and no verdicts.
 func (j ReviewJob) IsTaskJob() bool {
+	if j.JobType != "" {
+		return j.JobType == JobTypeTask
+	}
+	// Fallback heuristic for jobs without job_type (e.g., from old sync data)
 	if j.CommitID != nil {
-		return false // Has commit reference - it's a commit review
+		return false
 	}
 	if j.DiffContent != nil {
-		return false // Has diff content - it's a dirty review
+		return false
 	}
 	if j.GitRef == "dirty" {
-		return false // It's a dirty review (even if DiffContent not loaded)
+		return false
 	}
 	if strings.Contains(j.GitRef, "..") {
-		return false // It's a branch/range review
+		return false
 	}
 	if j.GitRef == "" {
-		return false // Invalid job state - not a valid task job
+		return false
 	}
 	return true
 }

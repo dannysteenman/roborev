@@ -217,6 +217,47 @@ func (db *DB) GetRepoByIdentity(identity string) (*Repo, error) {
 	return &r, nil
 }
 
+// GetRepoByIdentityCaseInsensitive is like GetRepoByIdentity but uses
+// case-insensitive comparison. Used by the CI poller since GitHub
+// owner/repo names are case-insensitive.
+// Excludes sync placeholders (root_path == identity) which don't have
+// a real local checkout.
+func (db *DB) GetRepoByIdentityCaseInsensitive(identity string) (*Repo, error) {
+	rows, err := db.Query(`
+		SELECT id, root_path, name, created_at, identity
+		FROM repos WHERE LOWER(identity) = LOWER(?) AND root_path != identity
+	`, identity)
+	if err != nil {
+		return nil, fmt.Errorf("query repo by identity (ci): %w", err)
+	}
+	defer rows.Close()
+
+	var r Repo
+	var count int
+	for rows.Next() {
+		count++
+		if count > 1 {
+			return nil, fmt.Errorf("multiple repos found with identity %q", identity)
+		}
+		var createdAt string
+		var identityVal sql.NullString
+		if err := rows.Scan(&r.ID, &r.RootPath, &r.Name, &createdAt, &identityVal); err != nil {
+			return nil, fmt.Errorf("scan repo: %w", err)
+		}
+		r.CreatedAt = parseSQLiteTime(createdAt)
+		if identityVal.Valid {
+			r.Identity = identityVal.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get repo by identity (ci): %w", err)
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	return &r, nil
+}
+
 // SyncableJob contains job data needed for sync
 type SyncableJob struct {
 	ID              int64
@@ -232,6 +273,8 @@ type SyncableJob struct {
 	Agent           string
 	Model           string
 	Reasoning       string
+	JobType         string
+	ReviewType      string
 	Status          string
 	Agentic         bool
 	EnqueuedAt      time.Time
@@ -251,7 +294,7 @@ func (db *DB) GetJobsToSync(machineID string, limit int) ([]SyncableJob, error) 
 		SELECT
 			j.id, j.uuid, j.repo_id, COALESCE(r.identity, ''),
 			j.commit_id, COALESCE(c.sha, ''), COALESCE(c.author, ''), COALESCE(c.subject, ''), COALESCE(c.timestamp, ''),
-			j.git_ref, j.agent, COALESCE(j.model, ''), COALESCE(j.reasoning, ''), j.status, j.agentic,
+			j.git_ref, j.agent, COALESCE(j.model, ''), COALESCE(j.reasoning, ''), COALESCE(j.job_type, 'review'), COALESCE(j.review_type, ''), j.status, j.agentic,
 			j.enqueued_at, COALESCE(j.started_at, ''), COALESCE(j.finished_at, ''),
 			COALESCE(j.prompt, ''), j.diff_content, COALESCE(j.error, ''),
 			j.source_machine_id, j.updated_at
@@ -286,7 +329,7 @@ func (db *DB) GetJobsToSync(machineID string, limit int) ([]SyncableJob, error) 
 		err := rows.Scan(
 			&j.ID, &j.UUID, &j.RepoID, &j.RepoIdentity,
 			&commitID, &j.CommitSHA, &j.CommitAuthor, &j.CommitSubject, &commitTimestamp,
-			&j.GitRef, &j.Agent, &j.Model, &j.Reasoning, &j.Status, &j.Agentic,
+			&j.GitRef, &j.Agent, &j.Model, &j.Reasoning, &j.JobType, &j.ReviewType, &j.Status, &j.Agentic,
 			&enqueuedAt, &startedAt, &finishedAt,
 			&j.Prompt, &diffContent, &j.Error,
 			&j.SourceMachineID, &updatedAt,
@@ -530,10 +573,10 @@ func (db *DB) UpsertPulledJob(j PulledJob, repoID int64, commitID *int64) error 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.Exec(`
 		INSERT INTO review_jobs (
-			uuid, repo_id, commit_id, git_ref, agent, model, reasoning, status, agentic,
+			uuid, repo_id, commit_id, git_ref, agent, model, reasoning, job_type, review_type, status, agentic,
 			enqueued_at, started_at, finished_at, prompt, diff_content, error,
 			source_machine_id, updated_at, synced_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(uuid) DO UPDATE SET
 			status = excluded.status,
 			finished_at = excluded.finished_at,
@@ -541,8 +584,8 @@ func (db *DB) UpsertPulledJob(j PulledJob, repoID int64, commitID *int64) error 
 			model = COALESCE(excluded.model, review_jobs.model),
 			updated_at = excluded.updated_at,
 			synced_at = ?
-	`, j.UUID, repoID, commitID, j.GitRef, j.Agent, nullStr(j.Model), j.Reasoning, // reasoning can be empty string, not NULL
-		j.Status, j.Agentic, j.EnqueuedAt.Format(time.RFC3339),
+	`, j.UUID, repoID, commitID, j.GitRef, j.Agent, nullStr(j.Model), j.Reasoning, j.JobType,
+		j.ReviewType, j.Status, j.Agentic, j.EnqueuedAt.Format(time.RFC3339),
 		nullTimeStr(j.StartedAt), nullTimeStr(j.FinishedAt),
 		nullStr(j.Prompt), j.DiffContent, nullStr(j.Error),
 		j.SourceMachineID, j.UpdatedAt.Format(time.RFC3339), now, now)
