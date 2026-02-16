@@ -239,3 +239,47 @@ func TestFilterEnv(t *testing.T) {
 		t.Fatalf("missing expected env vars in filtered result: %v", filtered)
 	}
 }
+
+func TestFilterEnvMultipleKeys(t *testing.T) {
+	env := []string{
+		"PATH=/usr/bin",
+		"ANTHROPIC_API_KEY=secret",
+		"CLAUDECODE=1",
+		"HOME=/home/test",
+	}
+
+	filtered := filterEnv(env, "ANTHROPIC_API_KEY", "CLAUDECODE")
+
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 env vars, got %d: %v", len(filtered), filtered)
+	}
+	for _, e := range filtered {
+		if strings.HasPrefix(e, "ANTHROPIC_API_KEY=") {
+			t.Fatal("ANTHROPIC_API_KEY should be stripped")
+		}
+		if strings.HasPrefix(e, "CLAUDECODE=") {
+			t.Fatal("CLAUDECODE should be stripped")
+		}
+	}
+}
+
+func TestFilterEnvExactMatchOnly(t *testing.T) {
+	env := []string{
+		"CLAUDE=1",
+		"CLAUDECODE=1",
+		"CLAUDE_NO_SOUND=1",
+		"PATH=/usr/bin",
+	}
+
+	filtered := filterEnv(env, "CLAUDE")
+
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 env vars, got %d: %v", len(filtered), filtered)
+	}
+	for _, e := range filtered {
+		k, _, _ := strings.Cut(e, "=")
+		if k == "CLAUDE" {
+			t.Fatal("CLAUDE should be stripped")
+		}
+	}
+}
