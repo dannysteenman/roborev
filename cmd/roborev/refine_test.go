@@ -875,7 +875,7 @@ func TestValidateRefineContext_RefusesMainBranchWithoutSince(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Validating without --since on main should fail
-	_, _, _, _, err = validateRefineContext("")
+	_, _, _, _, err = validateRefineContext("", "")
 	if err == nil {
 		t.Fatal("expected error when validating on main without --since")
 	}
@@ -907,7 +907,7 @@ func TestValidateRefineContext_AllowsMainBranchWithSince(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Validating with --since on main should pass
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(baseSHA)
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(baseSHA, "")
 	if err != nil {
 		t.Fatalf("validation should pass with --since on main, got: %v", err)
 	}
@@ -943,7 +943,7 @@ func TestValidateRefineContext_SinceWorksOnFeatureBranch(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// --since should work on feature branch
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(baseSHA)
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(baseSHA, "")
 	if err != nil {
 		t.Fatalf("--since should work on feature branch, got: %v", err)
 	}
@@ -975,7 +975,7 @@ func TestValidateRefineContext_InvalidSinceRef(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Invalid --since ref should fail with clear error
-	_, _, _, _, err = validateRefineContext("nonexistent-ref-abc123")
+	_, _, _, _, err = validateRefineContext("nonexistent-ref-abc123", "")
 	if err == nil {
 		t.Fatal("expected error for invalid --since ref")
 	}
@@ -1009,7 +1009,7 @@ func TestValidateRefineContext_SinceNotAncestorOfHEAD(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Using --since with a commit from a different branch (not ancestor of HEAD) should fail
-	_, _, _, _, err = validateRefineContext(otherBranchSHA)
+	_, _, _, _, err = validateRefineContext(otherBranchSHA, "")
 	if err == nil {
 		t.Fatal("expected error when --since is not an ancestor of HEAD")
 	}
@@ -1039,7 +1039,7 @@ func TestValidateRefineContext_FeatureBranchWithoutSinceStillWorks(t *testing.T)
 	defer os.Chdir(origDir)
 
 	// Feature branch without --since should pass validation (uses merge-base)
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", "")
 	if err != nil {
 		t.Fatalf("feature branch without --since should work, got: %v", err)
 	}
@@ -1342,5 +1342,137 @@ func TestResolveReasoningWithFast(t *testing.T) {
 					tt.reasoning, tt.fast, tt.reasoningExplicitlySet, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRefineFlagValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "all-branches and branch mutually exclusive",
+			args:    []string{"--all-branches", "--branch", "main"},
+			wantErr: "--all-branches and --branch are mutually exclusive",
+		},
+		{
+			name:    "all-branches and since mutually exclusive",
+			args:    []string{"--all-branches", "--since", "abc123"},
+			wantErr: "--all-branches and --since are mutually exclusive",
+		},
+		{
+			name:    "newest-first requires all-branches or list",
+			args:    []string{"--newest-first"},
+			wantErr: "--newest-first requires --all-branches or --list",
+		},
+		{
+			name: "newest-first with list is accepted",
+			args: []string{"--newest-first", "--list"},
+			// This will fail for other reasons (no daemon), but
+			// flag validation itself should pass.
+			wantErr: "",
+		},
+		{
+			name:    "newest-first with all-branches is accepted",
+			args:    []string{"--newest-first", "--all-branches"},
+			wantErr: "",
+		},
+		{
+			name:    "list and since mutually exclusive",
+			args:    []string{"--list", "--since", "abc123"},
+			wantErr: "--list and --since are mutually exclusive",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := refineCmd()
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			cmd.SetArgs(tt.args)
+
+			err := cmd.Execute()
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf(
+						"expected error containing %q, got: %v",
+						tt.wantErr, err,
+					)
+				}
+			} else if err != nil {
+				msg := err.Error()
+				isValidationErr := strings.Contains(msg, "mutually exclusive") ||
+					strings.Contains(msg, "requires --")
+				if isValidationErr {
+					t.Errorf("unexpected flag validation error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateRefineContext_BranchMismatch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, runGit := setupTestGitRepo(t)
+	runGit("checkout", "-b", "feature")
+	gitCommitFile(t, repoDir, runGit, "feat.txt", "f", "feat")
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir)
+
+	// Currently on "feature", but --branch says "other"
+	_, _, _, _, err = validateRefineContext("", "other")
+	if err == nil {
+		t.Fatal("expected error for branch mismatch")
+	}
+	if !strings.Contains(err.Error(), "not on branch") {
+		t.Errorf("expected 'not on branch' error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "feature") {
+		t.Errorf(
+			"expected error to mention current branch, got: %v",
+			err,
+		)
+	}
+}
+
+func TestValidateRefineContext_BranchMatch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, runGit := setupTestGitRepo(t)
+	runGit("checkout", "-b", "feature")
+	gitCommitFile(t, repoDir, runGit, "feat.txt", "f", "feat")
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir)
+
+	// --branch matches current branch — should pass validation
+	_, branch, _, _, err := validateRefineContext("", "feature")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if branch != "feature" {
+		t.Errorf("expected branch 'feature', got %q", branch)
 	}
 }

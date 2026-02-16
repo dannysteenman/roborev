@@ -686,13 +686,51 @@ func GetHooksPath(repoPath string) (string, error) {
 	return hooksPath, nil
 }
 
+// commitHookNames lists the hook scripts that can reject a commit.
+var commitHookNames = []string{
+	"pre-commit",
+	"prepare-commit-msg",
+	"commit-msg",
+}
+
+// hasCommitHooks returns true if the repo has at least one
+// executable commit-related hook installed.
+func hasCommitHooks(repoPath string) bool {
+	hooksDir, err := GetHooksPath(repoPath)
+	if err != nil {
+		return false
+	}
+	for _, name := range commitHookNames {
+		p := filepath.Join(hooksDir, name)
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		// On Unix, check the execute bit. On Windows every
+		// regular file is considered executable.
+		if runtime.GOOS == "windows" || info.Mode()&0o111 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // isHookCausingFailure checks whether a commit failure was caused
-// by a hook (pre-commit, commit-msg, etc.) by probing if a hookless
-// commit would succeed. Runs "git commit --dry-run --no-verify"
-// which validates the commit is viable (staged changes, identity)
-// without executing any hooks. If the dry-run passes, a hook must
-// have caused the failure.
+// by a hook (pre-commit, commit-msg, etc.). It combines two checks:
+//  1. At least one commit hook must be installed — if there are no
+//     hooks, the failure is definitionally non-hook (e.g., GPG
+//     signing, object-write errors).
+//  2. A hookless dry-run (`git commit --dry-run --no-verify`) must
+//     succeed, confirming the commit is otherwise viable.
+//
+// Both conditions must hold to classify the failure as hook-caused.
 func isHookCausingFailure(repoPath string) bool {
+	if !hasCommitHooks(repoPath) {
+		return false
+	}
 	cmd := exec.Command(
 		"git", "-C", repoPath, "commit",
 		"--dry-run", "--no-verify", "-m", "probe",
@@ -824,6 +862,21 @@ func IsWorkingTreeClean(repoPath string) bool {
 		return false // Assume dirty if we can't check
 	}
 	return len(strings.TrimSpace(string(output))) == 0
+}
+
+// CheckoutBranch switches to the given branch in the repository.
+func CheckoutBranch(repoPath, branch string) error {
+	cmd := exec.Command("git", "checkout", branch)
+	cmd.Dir = repoPath
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf(
+			"git checkout %s: %w: %s",
+			branch, err, stderr.String(),
+		)
+	}
+	return nil
 }
 
 // ResetWorkingTree discards all uncommitted changes (staged and unstaged)

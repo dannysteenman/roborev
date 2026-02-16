@@ -1368,6 +1368,72 @@ func TestCommitErrorHookFailedCommitMsgHook(t *testing.T) {
 	}
 }
 
+func TestCommitErrorHookFailedFalseForGPGSigningFailure(t *testing.T) {
+	// GPG signing failure: commit fails because there's no usable
+	// key, but --dry-run --no-verify passes (dry-run doesn't sign).
+	// Without the hasCommitHooks guard, this would be a false
+	// positive (HookFailed=true with no hooks installed).
+	repo := NewTestRepo(t)
+	repo.CommitFile("initial.txt", "initial", "initial commit")
+
+	// Force GPG signing with a non-existent key
+	repo.Run("config", "commit.gpgsign", "true")
+	repo.Run("config", "user.signingkey", "DEADBEEF00000000")
+
+	repo.WriteFile("new.txt", "content")
+	repo.Run("add", "new.txt")
+
+	_, err := CreateCommit(repo.Dir, "should fail from gpg")
+	if err == nil {
+		// Some CI environments may have gpg configured in a way
+		// that doesn't fail. Skip rather than give a false pass.
+		t.Skip("commit succeeded unexpectedly (gpg may be configured)")
+	}
+
+	var commitErr *CommitError
+	if !errors.As(err, &commitErr) {
+		t.Fatalf("expected CommitError type, got: %T", err)
+	}
+	if commitErr.HookFailed {
+		t.Error(
+			"HookFailed should be false for GPG signing " +
+				"failure (no hooks installed)",
+		)
+	}
+}
+
+func TestHasCommitHooksDetectsInstalledHooks(t *testing.T) {
+	repo := NewTestRepo(t)
+	repo.CommitFile("initial.txt", "initial", "initial commit")
+
+	if hasCommitHooks(repo.Dir) {
+		t.Error("expected no commit hooks in fresh repo")
+	}
+
+	repo.InstallHook("pre-commit", "#!/bin/sh\nexit 0\n")
+	if !hasCommitHooks(repo.Dir) {
+		t.Error("expected hasCommitHooks=true after installing pre-commit")
+	}
+}
+
+func TestHasCommitHooksIgnoresDirectories(t *testing.T) {
+	repo := NewTestRepo(t)
+	repo.CommitFile("initial.txt", "initial", "initial commit")
+
+	// Create a directory named like a hook — should not count.
+	hooksDir, err := GetHooksPath(repo.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(hooksDir, "pre-commit"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if hasCommitHooks(repo.Dir) {
+		t.Error("directory named pre-commit should not count as installed hook")
+	}
+}
+
 func TestIsAncestor(t *testing.T) {
 	repo := NewTestRepo(t)
 	repo.Run("symbolic-ref", "HEAD", "refs/heads/main")

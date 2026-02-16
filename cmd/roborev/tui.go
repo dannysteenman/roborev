@@ -1621,11 +1621,26 @@ func (m tuiModel) getVisibleJobs() []storage.ReviewJob {
 	return visible
 }
 
+// Queue help line constants (used by both queueVisibleRows and renderQueueView).
+const queueHelpLine1 = "x: cancel | r: rerun | t: tail | p: prompt | c: comment | y: copy | m: commit msg"
+const queueHelpLine2 = "↑/↓: navigate | enter: review | a: addressed | f: filter | h: hide | ?: commands | q: quit"
+
+// queueHelpLines computes how many terminal lines the queue help
+// footer occupies, accounting for wrapping at narrow widths.
+func queueHelpLines(width int) int {
+	if width <= 0 {
+		return 2
+	}
+	h1 := (len(queueHelpLine1) + width - 1) / width
+	h2 := (len(queueHelpLine2) + width - 1) / width
+	return h1 + h2
+}
+
 // queueVisibleRows returns how many queue rows fit in the current terminal.
 func (m tuiModel) queueVisibleRows() int {
-	// Keep in sync with renderQueueView reserved lines.
-	const reservedLines = 8
-	visibleRows := m.height - reservedLines
+	// title(1) + status(2) + header(2) + scroll(1) + flash(1) + help(dynamic)
+	reserved := 7 + queueHelpLines(m.width)
+	visibleRows := m.height - reserved
 	if visibleRows < 3 {
 		visibleRows = 3
 	}
@@ -2146,8 +2161,8 @@ func (m tuiModel) renderQueueView() string {
 	visibleSelectedIdx := m.getVisibleSelectedIdx()
 
 	// Calculate visible job range based on terminal height
-	// Reserve lines for: title(1) + status(2) + header(2) + scroll indicator(1) + status/update(1) + help(1)
-	reservedLines := 8
+	// title(1) + status(2) + header(2) + scroll(1) + flash(1) + help(dynamic)
+	reservedLines := 7 + queueHelpLines(m.width)
 	visibleRows := m.height - reservedLines
 	if visibleRows < 3 {
 		visibleRows = 3 // Show at least 3 jobs
@@ -2277,8 +2292,9 @@ func (m tuiModel) renderQueueView() string {
 	b.WriteString("\x1b[K\n") // Clear to end of line
 
 	// Help
-	helpLine := "↑/↓: navigate | enter: review | a: addressed | f: filter | h: hide | ?: help | q: quit"
-	b.WriteString(tuiHelpStyle.Render(helpLine))
+	b.WriteString(tuiHelpStyle.Render(queueHelpLine1))
+	b.WriteString("\x1b[K\n")
+	b.WriteString(tuiHelpStyle.Render(queueHelpLine2))
 	b.WriteString("\x1b[K") // Clear to end of line (no newline at end)
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -2600,10 +2616,13 @@ func (m tuiModel) renderReviewView() string {
 	}
 
 	// Help text wraps at narrow terminals
-	const helpText = "↑/↓: scroll | ←/→: prev/next | a: addressed | y: copy | ?: help | esc: back"
-	helpLines := 1
-	if m.width > 0 && m.width < len(helpText) {
-		helpLines = (len(helpText) + m.width - 1) / m.width
+	const helpLine1 = "p: prompt | c: comment | m: commit msg | a: addressed | y: copy"
+	const helpLine2 = "↑/↓: scroll | ←/→: prev/next | ?: commands | esc: back"
+	helpLines := 2
+	if m.width > 0 {
+		h1 := (len(helpLine1) + m.width - 1) / m.width
+		h2 := (len(helpLine2) + m.width - 1) / m.width
+		helpLines = h1 + h2
 	}
 
 	// Compute location line count (repo path + ref + branch can wrap)
@@ -2673,8 +2692,10 @@ func (m tuiModel) renderReviewView() string {
 	}
 	b.WriteString("\x1b[K\n") // Clear status line
 
-	b.WriteString(tuiHelpStyle.Render(helpText))
-	b.WriteString("\x1b[K") // Clear help line
+	b.WriteString(tuiHelpStyle.Render(helpLine1))
+	b.WriteString("\x1b[K\n")
+	b.WriteString(tuiHelpStyle.Render(helpLine2))
+	b.WriteString("\x1b[K")
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
 	return b.String()
@@ -2765,7 +2786,7 @@ func (m tuiModel) renderPromptView() string {
 	}
 	b.WriteString("\x1b[K\n") // Clear scroll indicator line
 
-	b.WriteString(tuiHelpStyle.Render("↑/↓: scroll | ←/→: prev/next | p: toggle prompt/review | ?: help | esc: back"))
+	b.WriteString(tuiHelpStyle.Render("↑/↓: scroll | ←/→: prev/next | p: toggle prompt/review | ?: commands | esc: back"))
 	b.WriteString("\x1b[K") // Clear help line
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
