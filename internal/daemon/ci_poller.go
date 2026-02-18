@@ -427,7 +427,7 @@ func (p *CIPoller) processPR(ctx context.Context, ghRepo string, pr ghPR, cfg *c
 				resolvedAgent = resolved.Name()
 			}
 
-			// Resolve model through workflow config when not explicitly set
+			// Resolve model through workflow config
 			resolvedModel := config.ResolveModelForWorkflow(cfg.CI.Model, repo.RootPath, cfg, workflow, reasoning)
 
 			job, err := p.db.EnqueueJob(storage.EnqueueOpts{

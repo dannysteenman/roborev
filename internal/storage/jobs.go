@@ -1004,12 +1004,30 @@ func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
 }
 
 // FailJob marks a job as failed with an error message.
-// Only updates if job is still in 'running' state (respects cancellation).
-func (db *DB) FailJob(jobID int64, errorMsg string) error {
+// Only updates if job is still in 'running' state and owned by the given worker
+// (respects cancellation and prevents stale workers from failing reclaimed jobs).
+// Pass empty workerID to skip the ownership check (for admin/test callers).
+// Returns true if the job was actually updated (false when ownership or status
+// check prevented the update).
+func (db *DB) FailJob(jobID int64, workerID string, errorMsg string) (bool, error) {
 	now := time.Now().Format(time.RFC3339)
-	_, err := db.Exec(`UPDATE review_jobs SET status = 'failed', finished_at = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
-		now, errorMsg, now, jobID)
-	return err
+	var result sql.Result
+	var err error
+	if workerID != "" {
+		result, err = db.Exec(`UPDATE review_jobs SET status = 'failed', finished_at = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'running' AND worker_id = ?`,
+			now, errorMsg, now, jobID, workerID)
+	} else {
+		result, err = db.Exec(`UPDATE review_jobs SET status = 'failed', finished_at = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
+			now, errorMsg, now, jobID)
+	}
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 // CancelJob marks a running or queued job as canceled
@@ -1087,17 +1105,26 @@ func (db *DB) ReenqueueJob(jobID int64) error {
 	return nil
 }
 
-// RetryJob atomically resets a running job to queued for retry.
-// Returns false if max retries reached or job is not in running state.
-// maxRetries is the number of retries allowed (e.g., 3 means up to 4 total attempts).
-func (db *DB) RetryJob(jobID int64, maxRetries int) (bool, error) {
-	// Atomically update only if retry_count < maxRetries and status is running
-	// This prevents race conditions with multiple workers
-	result, err := db.Exec(`
-		UPDATE review_jobs
-		SET status = 'queued', worker_id = NULL, started_at = NULL, finished_at = NULL, error = NULL, retry_count = retry_count + 1
-		WHERE id = ? AND retry_count < ? AND status = 'running'
-	`, jobID, maxRetries)
+// RetryJob requeues a running job for retry if retry_count < maxRetries.
+// When workerID is non-empty the update is scoped to the owning worker,
+// preventing a stale/zombie worker from requeuing a reclaimed job.
+// Pass empty workerID to skip the ownership check (for admin/test callers).
+func (db *DB) RetryJob(jobID int64, workerID string, maxRetries int) (bool, error) {
+	var result sql.Result
+	var err error
+	if workerID != "" {
+		result, err = db.Exec(`
+			UPDATE review_jobs
+			SET status = 'queued', worker_id = NULL, started_at = NULL, finished_at = NULL, error = NULL, retry_count = retry_count + 1
+			WHERE id = ? AND retry_count < ? AND status = 'running' AND worker_id = ?
+		`, jobID, maxRetries, workerID)
+	} else {
+		result, err = db.Exec(`
+			UPDATE review_jobs
+			SET status = 'queued', worker_id = NULL, started_at = NULL, finished_at = NULL, error = NULL, retry_count = retry_count + 1
+			WHERE id = ? AND retry_count < ? AND status = 'running'
+		`, jobID, maxRetries)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -1108,6 +1135,36 @@ func (db *DB) RetryJob(jobID int64, maxRetries int) (bool, error) {
 	}
 
 	return rows > 0, nil
+}
+
+// FailoverJob atomically switches a running job to the given backup agent
+// and requeues it. Returns false if the job is not in running state, the
+// worker doesn't own the job, or the backup agent is the same as the
+// current agent.
+func (db *DB) FailoverJob(jobID int64, workerID string, backupAgent string) (bool, error) {
+	if backupAgent == "" {
+		return false, nil
+	}
+	result, err := db.Exec(`
+		UPDATE review_jobs
+		SET agent = ?,
+		    model = NULL,
+		    retry_count = 0,
+		    status = 'queued',
+		    worker_id = NULL,
+		    started_at = NULL,
+		    finished_at = NULL,
+		    error = NULL
+		WHERE id = ?
+		  AND status = 'running'
+		  AND worker_id = ?
+		  AND agent != ?
+	`, backupAgent, jobID, workerID, backupAgent)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
 }
 
 // GetJobRetryCount returns the retry count for a job
