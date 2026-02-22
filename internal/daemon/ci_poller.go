@@ -617,15 +617,24 @@ func isValidGitRepo(path string) bool {
 
 // cloneRemoteMatches checks whether the origin remote of a git repo
 // at path corresponds to the expected "owner/repo" identifier.
-// Returns (true, nil) on match, (false, nil) on confirmed mismatch,
-// and (false, err) on operational errors (so callers can avoid
-// deleting a valid clone on transient failures).
+// Returns (true, nil) on match, (false, nil) on confirmed mismatch
+// (including missing origin), and (false, err) on operational errors
+// (so callers can avoid deleting a valid clone on transient failures).
 func cloneRemoteMatches(path, ghRepo string) (bool, error) {
 	cmd := exec.Command(
 		"git", "-C", path, "remote", "get-url", "origin",
 	)
 	out, err := cmd.Output()
 	if err != nil {
+		// "No such remote 'origin'" is a deterministic invalid
+		// state — treat as confirmed mismatch, not transient error.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "No such remote") {
+				return false, nil
+			}
+		}
 		return false, fmt.Errorf(
 			"get origin URL for %s: %w", path, err,
 		)
