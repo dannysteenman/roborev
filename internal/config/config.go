@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/roborev-dev/roborev/internal/git"
@@ -216,8 +217,21 @@ type CIConfig struct {
 	// PollInterval is how often to poll for PRs (e.g., "5m", "10m"). Default: 5m
 	PollInterval string `toml:"poll_interval"`
 
-	// Repos is the list of GitHub repos to poll in "owner/repo" format
+	// Repos is the list of GitHub repos to poll in "owner/repo" format.
+	// Supports glob patterns (e.g., "myorg/*", "myorg/api-*") using path.Match syntax.
+	// The owner part must be literal — no wildcards before the "/".
 	Repos []string `toml:"repos"`
+
+	// ExcludeRepos is a list of glob patterns to exclude from the resolved repo list.
+	// Applies to both exact entries and wildcard-expanded entries.
+	ExcludeRepos []string `toml:"exclude_repos"`
+
+	// MaxRepos is a safety cap on the total number of expanded repos. Default: 100.
+	MaxRepos int `toml:"max_repos"`
+
+	// RepoRefreshInterval is how often to re-discover repos via the GitHub API
+	// for wildcard patterns (e.g., "1h", "30m"). Default: 1h, minimum: 1m.
+	RepoRefreshInterval string `toml:"repo_refresh_interval"`
 
 	// ReviewTypes is the list of review types to run for each PR (e.g., ["security", "default"]).
 	// Defaults to ["security"] if empty.
@@ -261,6 +275,31 @@ func (c *CIConfig) ResolvedAgents() []string {
 		return c.Agents
 	}
 	return []string{""}
+}
+
+// ResolvedMaxRepos returns the maximum number of repos to poll.
+// Defaults to 100 if not set or non-positive.
+func (c *CIConfig) ResolvedMaxRepos() int {
+	if c.MaxRepos > 0 {
+		return c.MaxRepos
+	}
+	return 100
+}
+
+// ResolvedRepoRefreshInterval returns the parsed repo refresh interval.
+// Defaults to 1h if not set or unparseable. Minimum is 1m.
+func (c *CIConfig) ResolvedRepoRefreshInterval() time.Duration {
+	if c.RepoRefreshInterval == "" {
+		return time.Hour
+	}
+	d, err := time.ParseDuration(c.RepoRefreshInterval)
+	if err != nil || d < time.Minute {
+		if d > 0 && d < time.Minute {
+			return time.Minute
+		}
+		return time.Hour
+	}
+	return d
 }
 
 // SyncConfig holds configuration for PostgreSQL sync
