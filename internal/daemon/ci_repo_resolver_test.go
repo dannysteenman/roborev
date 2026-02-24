@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -552,14 +553,37 @@ func TestRepoResolver_CancelledContextReturnsError(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before calling Resolve
+	cancel()
 
 	_, err := r.Resolve(ctx, ci, nil)
-	if err == nil {
-		t.Fatal("expected error from cancelled context")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "canceled") {
-		t.Errorf("expected context.Canceled, got: %v", err)
+}
+
+func TestRepoResolver_DeadlineExceededReturnsError(t *testing.T) {
+	r := &RepoResolver{
+		listReposFn: func(ctx context.Context, _ string, _ []string) ([]string, error) {
+			return nil, ctx.Err()
+		},
+	}
+
+	ci := &config.CIConfig{
+		Repos: []string{"acme/*"},
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(), 0,
+	)
+	defer cancel()
+	// Allow timeout to fire
+	time.Sleep(time.Millisecond)
+
+	_, err := r.Resolve(ctx, ci, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf(
+			"expected context.DeadlineExceeded, got: %v", err,
+		)
 	}
 }
 
