@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -205,7 +206,11 @@ func (p *CIPoller) poll(ctx context.Context) {
 	})
 	if err != nil {
 		log.Printf("CI poller: repo resolver error: %v (falling back to exact entries)", err)
-		repos = ExactReposOnly(cfg.CI.Repos)
+		repos = applyExclusions(ExactReposOnly(cfg.CI.Repos), cfg.CI.ExcludeRepos)
+		if maxRepos := cfg.CI.ResolvedMaxRepos(); len(repos) > maxRepos {
+			sort.Strings(repos)
+			repos = repos[:maxRepos]
+		}
 	}
 
 	for _, ghRepo := range repos {

@@ -56,17 +56,22 @@ func (r *RepoResolver) Resolve(ctx context.Context, ci *config.CIConfig, envFn g
 	}
 	r.mu.Unlock()
 
-	repos, err := r.expand(ctx, ci, envFn)
+	repos, degraded, err := r.expand(ctx, ci, envFn)
 	if err != nil {
 		return nil, err
 	}
 
-	r.mu.Lock()
-	r.cached = repos
-	r.hasCache = true
-	r.cachedAt = time.Now()
-	r.cacheKey = key
-	r.mu.Unlock()
+	// Only cache complete results. Degraded results (API failures during
+	// wildcard expansion) are returned as-is so the caller gets the best
+	// available data, but the next poll will retry the failed API calls.
+	if !degraded {
+		r.mu.Lock()
+		r.cached = repos
+		r.hasCache = true
+		r.cachedAt = time.Now()
+		r.cacheKey = key
+		r.mu.Unlock()
+	}
 
 	result := make([]string, len(repos))
 	copy(result, repos)
@@ -84,7 +89,11 @@ func (r *RepoResolver) buildCacheKey(ci *config.CIConfig) string {
 // expand separates exact entries from wildcard patterns, calls the
 // GitHub API once per owner for wildcards, applies matching and
 // exclusions, deduplicates, and enforces max_repos.
-func (r *RepoResolver) expand(ctx context.Context, ci *config.CIConfig, envFn ghEnvFn) ([]string, error) {
+//
+// The returned degraded flag is true when one or more API calls failed
+// during wildcard expansion. The caller should avoid caching degraded
+// results so that the next poll retries the failed API calls.
+func (r *RepoResolver) expand(ctx context.Context, ci *config.CIConfig, envFn ghEnvFn) ([]string, bool, error) {
 	var exact []string
 	// owner → list of full patterns like "owner/pattern"
 	wildcardsByOwner := make(map[string][]string)
@@ -102,17 +111,20 @@ func (r *RepoResolver) expand(ctx context.Context, ci *config.CIConfig, envFn gh
 		}
 	}
 
-	// Expand wildcards by owner
+	// Deduplicate exact entries
 	seen := make(map[string]bool, len(exact))
-	var result []string
+	var exactResult []string
 	for _, e := range exact {
 		lower := strings.ToLower(e)
 		if !seen[lower] {
 			seen[lower] = true
-			result = append(result, e)
+			exactResult = append(exactResult, e)
 		}
 	}
 
+	// Expand wildcards by owner
+	var degraded bool
+	var wildcardResult []string
 	for owner, patterns := range wildcardsByOwner {
 		var env []string
 		if envFn != nil {
@@ -122,6 +134,7 @@ func (r *RepoResolver) expand(ctx context.Context, ci *config.CIConfig, envFn gh
 		repos, err := r.callListRepos(ctx, owner, env)
 		if err != nil {
 			log.Printf("CI repo resolver: failed to list repos for %q: %v (skipping wildcards for this owner)", owner, err)
+			degraded = true
 			continue
 		}
 
@@ -136,7 +149,7 @@ func (r *RepoResolver) expand(ctx context.Context, ci *config.CIConfig, envFn gh
 					lower := strings.ToLower(repo)
 					if !seen[lower] {
 						seen[lower] = true
-						result = append(result, repo)
+						wildcardResult = append(wildcardResult, repo)
 					}
 					break // no need to match other patterns for same repo
 				}
@@ -144,20 +157,38 @@ func (r *RepoResolver) expand(ctx context.Context, ci *config.CIConfig, envFn gh
 		}
 	}
 
-	// Apply exclusions
-	result = applyExclusions(result, ci.ExcludeRepos)
+	// Apply exclusions to both sets
+	exactResult = applyExclusions(exactResult, ci.ExcludeRepos)
+	wildcardResult = applyExclusions(wildcardResult, ci.ExcludeRepos)
 
-	// Sort for deterministic output
-	sort.Strings(result)
-
-	// Enforce max_repos
+	// Enforce max_repos: explicit repos have priority over wildcard-expanded repos.
 	maxRepos := ci.ResolvedMaxRepos()
-	if len(result) > maxRepos {
-		log.Printf("CI repo resolver: expanded to %d repos, truncating to max_repos=%d", len(result), maxRepos)
-		result = result[:maxRepos]
+	total := len(exactResult) + len(wildcardResult)
+
+	if total > maxRepos {
+		// Sort wildcards for deterministic truncation
+		sort.Strings(wildcardResult)
+
+		remaining := maxRepos - len(exactResult)
+		if remaining <= 0 {
+			// Even exact repos exceed limit — truncate exact too
+			sort.Strings(exactResult)
+			exactResult = exactResult[:maxRepos]
+			wildcardResult = nil
+		} else if len(wildcardResult) > remaining {
+			wildcardResult = wildcardResult[:remaining]
+		}
+
+		log.Printf("CI repo resolver: expanded to %d repos, truncating to max_repos=%d (keeping %d explicit)", total, maxRepos, len(exactResult))
 	}
 
-	return result, nil
+	// Combine and sort for deterministic output
+	result := make([]string, 0, len(exactResult)+len(wildcardResult))
+	result = append(result, exactResult...)
+	result = append(result, wildcardResult...)
+	sort.Strings(result)
+
+	return result, degraded, nil
 }
 
 // callListRepos invokes the gh CLI or the test seam to list repos for an owner.

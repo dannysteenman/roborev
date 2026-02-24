@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -316,8 +317,10 @@ func TestRepoResolver_CacheInvalidationOnMaxReposChange(t *testing.T) {
 }
 
 func TestRepoResolver_APIFailureFallback(t *testing.T) {
+	var calls int
 	r := &RepoResolver{
 		listReposFn: func(_ context.Context, _ string, _ []string) ([]string, error) {
+			calls++
 			return nil, fmt.Errorf("network error")
 		},
 	}
@@ -326,13 +329,30 @@ func TestRepoResolver_APIFailureFallback(t *testing.T) {
 		Repos: []string{"acme/*", "acme/explicit-repo"},
 	}
 
+	ctx := context.Background()
+
 	// Should succeed — wildcards fail but exact entries pass through
-	repos, err := r.Resolve(context.Background(), ci, nil)
+	repos, err := r.Resolve(ctx, ci, nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if len(repos) != 1 || repos[0] != "acme/explicit-repo" {
 		t.Errorf("expected [acme/explicit-repo] on API failure, got %v", repos)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 API call, got %d", calls)
+	}
+
+	// Degraded results must NOT be cached — next call should retry the API
+	repos2, err := r.Resolve(ctx, ci, nil)
+	if err != nil {
+		t.Fatalf("Resolve 2: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected degraded result to NOT be cached (2 calls), got %d", calls)
+	}
+	if len(repos2) != 1 || repos2[0] != "acme/explicit-repo" {
+		t.Errorf("expected [acme/explicit-repo] on second call, got %v", repos2)
 	}
 }
 
@@ -453,6 +473,38 @@ func TestExactReposOnly(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRepoResolver_MaxReposPreservesExplicit(t *testing.T) {
+	r := &RepoResolver{
+		listReposFn: func(_ context.Context, _ string, _ []string) ([]string, error) {
+			// Return many repos that sort before the explicit ones alphabetically
+			repos := make([]string, 20)
+			for i := range repos {
+				repos[i] = fmt.Sprintf("acme/aaa-%02d", i)
+			}
+			return repos, nil
+		},
+	}
+
+	ci := &config.CIConfig{
+		// "acme/zzz-important" sorts last alphabetically but is explicit
+		Repos:    []string{"acme/zzz-important", "acme/*"},
+		MaxRepos: 5,
+	}
+
+	repos, err := r.Resolve(context.Background(), ci, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(repos) != 5 {
+		t.Fatalf("expected 5 repos (max_repos cap), got %d: %v", len(repos), repos)
+	}
+
+	// The explicit repo must always be included regardless of alphabetical position
+	if !slices.Contains(repos, "acme/zzz-important") {
+		t.Errorf("explicit repo acme/zzz-important was dropped by max_repos truncation: %v", repos)
 	}
 }
 
